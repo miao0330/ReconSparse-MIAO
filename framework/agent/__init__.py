@@ -16,16 +16,16 @@ __all__ = [
 
 _LAZY_ATTRS = {
     "Agent": ("framework.agent.base", "Agent"),
-    "DiffusionDriveV2Policy": ("framework.agent.policy_diffusiondrivev2", "DiffusionDriveV2Policy"),
+    "DiffusionDriveV2Policy": ("framework.agent.diffusiondrive_v2", "DiffusionDriveV2Policy"),
     "DummyPolicy": ("framework.agent.policy_dummy", "DummyPolicy"),
-    "SparseDrivePolicy": ("framework.agent.policy_sparsedrive", "SparseDrivePolicy"),
-    "SparseDriveV2Policy": ("framework.agent.policy_sparsedrive_v2", "SparseDriveV2Policy"),
+    "SparseDrivePolicy": ("framework.agent.sparsedrive_v1", "SparseDrivePolicy"),
+    "SparseDriveV2Policy": ("framework.agent.sparsedrive_v2", "SparseDriveV2Policy"),
 }
 
 
 def __getattr__(name: str) -> Any:
     if name == "DiffusionDriveV2Agent":
-        value = getattr(import_module("framework.agent.policy_diffusiondrivev2"), "DiffusionDriveV2Policy")
+        value = getattr(import_module("framework.agent.diffusiondrive_v2"), "DiffusionDriveV2Policy")
         globals()[name] = value
         return value
 

@@ -1,11 +1,10 @@
 # framework/algorithms
 
-这个目录负责 **算法目标函数、算法配置描述与 GRPO counterfactual scorer**。它是 learner 链路里的 objective/config/scorer 层，不负责直接运行 Trainer。
+这个目录负责 **纯算法目标函数、return/advantage math、算法配置描述与 GRPO counterfactual scorer**。它是 learner 链路里的 objective/config/scorer 层，不负责直接运行 Trainer，也不包含具体后端模型的 replay 或候选语义。
 
 ## 目录职责
 
 - 从 batch 模块拿到已经整理好的 obs、adv、ret、old_logp、replay。
-- 调用 agent 的 replay 接口，重算当前策略下的 logp。
 - 计算 PPO、ReinforcePP、SAC-style 或 GRPO 的目标函数、裁剪项、价值损失和统计指标。
 - 提供 PPO/ReinforcePP/SAC 规格对象（裁剪系数、优化超参数、梯度与采样相关参数）给 learner runtime 使用。
 - 承载 NuScenes PDM、CRAFT/CARL 等 GRPO counterfactual scorer 及其共享工具。
@@ -15,6 +14,7 @@
 - 不在这里构建 Lightning `Trainer`。
 - 不在这里驱动训练循环。
 - 不在这里做 actor-learner 协调与 checkpoint/version 发布。
+- 不在这里解释 SparseDrive/DiffusionDrive 的 replay、candidate identity 或 HUGSIM 观测。
 
 ## 文件说明
 
@@ -34,7 +34,7 @@
 
 ### ppo.py
 
-PPO 的配置/规格容器。
+PPO 的配置/规格容器和纯 PPO objective/metrics。
 
 - 组织 PPO 所需超参数与 value net 引用。
 - 暴露 learner runtime 需要读取的字段（如 `clip_eps`、`vf_coef`、`minibatch_size`、`grad_accum_steps` 等）。
@@ -42,7 +42,7 @@ PPO 的配置/规格容器。
 
 ### reinforcepp.py
 
-ReinforcePP 的配置/规格容器。
+ReinforcePP 的配置/规格容器和纯 Reinforce objective/metrics。
 
 - 组织 ReinforcePP 训练所需参数。
 - 暴露 learner runtime 读取的训练相关字段。
@@ -50,19 +50,23 @@ ReinforcePP 的配置/规格容器。
 
 ### sac.py
 
-SAC-style 的配置/规格容器。
+SAC-style 的配置/规格容器和纯 entropy-regularized policy objective。
 
 - 当前 actor-learner shard 只保存 replay、闭环 reward、done 和 log-prob，不是标准 off-policy SAC replay buffer。
 - 因此这里的 `SAC` 是兼容现有闭环 reward 路径的 entropy-regularized policy-gradient 规格对象。
-- 它通过 `trajectory_policy_core.py` 里的 SAC-style objective 使用闭环 return/advantage 和 `entropy_coef`，不改变 shard schema。
+- 它通过 `sac.py` 里的 SAC-style objective 使用闭环 return/advantage 和 `entropy_coef`，不改变 shard schema。
 
-### trajectory_policy_core.py
+### returns.py
 
-策略目标函数公共库。
+通用 return/advantage math。
 
-- 提供 agent_logp_from_replay_batch，屏蔽不同 Agent 的 replay 接口差异。
-- 统一实现 PPO、Reinforce、SAC-style 目标函数和对应 metrics 统计。
-- `framework/lightning/trajectory_module.py` 的 `training_step` 会直接依赖这里。
+- `compute_gae`
+- `compute_returns`
+- `normalize_advantages`
+
+### grpo.py
+
+GRPO 和 AUX risk-decel 的纯 objective math。
 
 ### nuscenes_pdm_scorer.py
 
@@ -94,6 +98,6 @@ Learner 端主流程大致是：
 2. `framework/batch/actor_learner.py` 把 shard 组装成训练 batch。
 3. `runner/learner_factory.py` 构建 PPO/ReinforcePP 规格对象（仅配置承载，PPO 同时携带 value net）。
 4. `runner/learner_runtime.py` 组装 Lightning 训练入口，`trajectory_module.py` 负责实际 `training_step`，`actor_learner_module.py` 负责 actor-learner 生命周期钩子。
-5. `trajectory_policy_core.py` 为 Lightning 模块提供 PPO/Reinforce 目标函数与 metrics 计算。
+5. `ppo.py`、`reinforcepp.py`、`sac.py`、`grpo.py` 为 Lightning 模块提供纯 objective 与 metrics 计算。
 
-当前 canonical 目标函数入口就是 `trajectory_policy_core.py`，batch 组装入口就是 `framework/batch/actor_learner.py`。
+当前 canonical 目标函数入口是 `framework/algorithms/*` 中对应算法模块，batch 组装入口是 `framework/batch/actor_learner.py`。

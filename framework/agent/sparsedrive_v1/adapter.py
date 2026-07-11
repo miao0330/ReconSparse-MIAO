@@ -1,21 +1,73 @@
 import os
 import sys
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from .base import Agent
+from ..base import Agent
 from framework.utils.repo_paths import resolve_ego_ads_subdir
+from .candidate_adapter import SparseDriveCandidateAdapterMixin
+from .rl_adapter import SparseDriveRLAdapterMixin
 
 
 # Ensure SparseDrive is importable
 _SPARSEDRIVE_ROOT = resolve_ego_ads_subdir("SparseDrive")
 if _SPARSEDRIVE_ROOT not in sys.path:
     sys.path.append(_SPARSEDRIVE_ROOT)
+
+
+_HUGSIM_OBS_CAMERA_INDEX = {
+    "front": 0,
+    "front_left": 1,
+    "front_right": 2,
+    "back_left": 3,
+    "back": 4,
+    "back_right": 5,
+}
+
+# Keep the camera embedding order used by egoADs/SparseDrive's NuScenes
+# converter: CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT, CAM_BACK,
+# CAM_BACK_LEFT, CAM_BACK_RIGHT.
+_SPARSEDRIVE_V1_CAMERA_ORDER = (
+    "front",
+    "front_right",
+    "front_left",
+    "back",
+    "back_left",
+    "back_right",
+)
+
+_HUGSIM_OBS_MARKER_KEYS = ("hugsim_step_idx", "hugsim_timestamp", "official_scene_name")
+
+# HUGSIM exposes ego_pose/cam2ego in its render vehicle frame. SparseDrive-v1
+# temporal anchors and planning trajectories use its original lidar frame:
+# x right, y forward, z up. Keep this conversion local to v1 so other HUGSIM
+# consumers continue to see the unmodified HUGSIM pose.
+_HUGSIM_RENDER_TO_REPO_GLOBAL = np.asarray(
+    [
+        [0.0, 0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+_HUGSIM_RENDER_VEHICLE_TO_SPARSEDRIVE_V1_LIDAR = np.asarray(
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+_SPARSEDRIVE_V1_LIDAR_TO_HUGSIM_RENDER_VEHICLE = np.linalg.inv(
+    _HUGSIM_RENDER_VEHICLE_TO_SPARSEDRIVE_V1_LIDAR
+).astype(np.float32)
 
 
 def _as_float_tensor(x: Any, *, device: torch.device) -> torch.Tensor:
@@ -36,7 +88,190 @@ def _resize_rgb_uint8(img: np.ndarray, *, out_hw: Tuple[int, int]) -> np.ndarray
     return cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
 
 
-class SparseDrivePolicy(Agent):
+def _is_hugsim_observation(observation: Dict[str, Any]) -> bool:
+    return any(key in observation for key in _HUGSIM_OBS_MARKER_KEYS)
+
+
+def _hugsim_render_pose_to_sparsedrive_v1_lidar_global(ego_pose: np.ndarray) -> np.ndarray:
+    pose = np.asarray(ego_pose, dtype=np.float32).reshape(4, 4)
+    return (
+        _HUGSIM_RENDER_TO_REPO_GLOBAL
+        @ pose
+        @ _SPARSEDRIVE_V1_LIDAR_TO_HUGSIM_RENDER_VEHICLE
+    ).astype(np.float32)
+
+
+def _hugsim_cam2ego_to_sparsedrive_v1_cam2lidar(cam2ego: np.ndarray) -> np.ndarray:
+    cam = np.asarray(cam2ego, dtype=np.float32)
+    if cam.ndim != 3 or cam.shape[-2:] != (4, 4):
+        raise ValueError(f"Expected cam2ego shape (N,4,4), got {cam.shape}")
+    return (
+        _HUGSIM_RENDER_VEHICLE_TO_SPARSEDRIVE_V1_LIDAR[None, :, :]
+        @ cam
+    ).astype(np.float32)
+
+
+def _resolve_plugin_module_path(*, config_path: str, plugin_dir: str | None, sparsedrive_root: str) -> str:
+    if plugin_dir:
+        raw_plugin_dir = str(plugin_dir)
+        if os.path.isdir(raw_plugin_dir) and os.path.exists(os.path.join(raw_plugin_dir, "__init__.py")):
+            raw_module_dir = raw_plugin_dir
+        else:
+            raw_module_dir = os.path.dirname(raw_plugin_dir)
+    else:
+        raw_module_dir = os.path.dirname(str(config_path))
+
+    candidates: list[str] = []
+    if os.path.isabs(raw_module_dir):
+        candidates.append(os.path.abspath(raw_module_dir))
+        marker = f"{os.sep}SparseDrive{os.sep}"
+        if marker in raw_module_dir:
+            suffix = raw_module_dir.split(marker, 1)[1]
+            candidates.append(os.path.abspath(os.path.join(str(sparsedrive_root), suffix)))
+    else:
+        candidates.append(os.path.abspath(os.path.join(str(sparsedrive_root), raw_module_dir)))
+        candidates.append(os.path.abspath(os.path.join(os.path.dirname(str(config_path)), raw_module_dir)))
+
+    sparse_abs = os.path.abspath(str(sparsedrive_root))
+    for candidate in candidates:
+        if candidate == sparse_abs or candidate.startswith(sparse_abs + os.sep):
+            rel = os.path.relpath(candidate, sparse_abs)
+            return rel.replace(os.sep, ".")
+
+    return raw_module_dir.strip(os.sep).replace(os.sep, ".")
+
+
+def _default_sparse_data_roots() -> list[str]:
+    return [
+        os.path.join(str(_SPARSEDRIVE_ROOT), "data"),
+        "/OpenDataset/zhaodanqi/sparsedrive_data",
+    ]
+
+
+def _resolve_sparse_asset_path(
+    path: str,
+    *,
+    sparsedrive_root: str,
+    data_roots: list[str] | None = None,
+) -> str:
+    text = str(path)
+    suffix: str | None = None
+    marker = f"{os.sep}SparseDrive{os.sep}"
+    if os.path.isabs(text) and marker in text:
+        suffix = text.split(marker, 1)[1]
+    elif text.startswith("data" + os.sep) or text.startswith("data/"):
+        suffix = text.replace("/", os.sep)
+    if suffix is None:
+        return text
+
+    candidates = [os.path.abspath(os.path.join(str(sparsedrive_root), suffix))]
+    data_prefix = "data" + os.sep
+    if suffix.startswith(data_prefix):
+        data_suffix = suffix[len(data_prefix) :]
+        for root in data_roots if data_roots is not None else _default_sparse_data_roots():
+            candidates.append(os.path.abspath(os.path.join(str(root), data_suffix)))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return text
+
+
+def _rewrite_sparse_asset_paths(obj: Any, *, sparsedrive_root: str) -> Any:
+    cfg_dict = getattr(obj, "_cfg_dict", None)
+    if cfg_dict is not None:
+        _rewrite_sparse_asset_paths(cfg_dict, sparsedrive_root=sparsedrive_root)
+        return obj
+    if isinstance(obj, str):
+        return _resolve_sparse_asset_path(obj, sparsedrive_root=sparsedrive_root)
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            obj[key] = _rewrite_sparse_asset_paths(value, sparsedrive_root=sparsedrive_root)
+        return obj
+    if isinstance(obj, list):
+        for idx, value in enumerate(list(obj)):
+            obj[idx] = _rewrite_sparse_asset_paths(value, sparsedrive_root=sparsedrive_root)
+        return obj
+    if isinstance(obj, tuple):
+        return tuple(_rewrite_sparse_asset_paths(value, sparsedrive_root=sparsedrive_root) for value in obj)
+    return obj
+
+
+def _checkpoint_has_agent_prefix(path: str) -> bool:
+    ckpt = torch.load(path, map_location="cpu")
+    sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else None
+    if not isinstance(sd, dict):
+        return False
+    return any(str(key).startswith("agent.") for key in sd.keys())
+
+
+def _normalize_trainable_prefixes(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        out: List[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _apply_trainable_prefixes(
+    module: torch.nn.Module,
+    prefixes: Sequence[str],
+    *,
+    frozen_prefixes: Sequence[str] | None = None,
+) -> tuple[int, int]:
+    normalized = [str(prefix).strip() for prefix in prefixes if str(prefix).strip()]
+    normalized_frozen = [str(prefix).strip() for prefix in (frozen_prefixes or []) if str(prefix).strip()]
+    if len(normalized) == 0:
+        if len(normalized_frozen) > 0:
+            for name, param in module.named_parameters():
+                if any(name.startswith(prefix) for prefix in normalized_frozen):
+                    param.requires_grad = False
+        total = sum(1 for _ in module.parameters())
+        trainable = sum(1 for param in module.parameters() if getattr(param, "requires_grad", False))
+        return total, trainable
+
+    for param in module.parameters():
+        param.requires_grad = False
+
+    trainable = 0
+    total = 0
+    for name, param in module.named_parameters():
+        total += 1
+        if any(name.startswith(prefix) for prefix in normalized):
+            param.requires_grad = True
+        if any(name.startswith(prefix) for prefix in normalized_frozen):
+            param.requires_grad = False
+        if getattr(param, "requires_grad", False):
+            trainable += 1
+    return total, trainable
+
+
+def _summarize_parameter_status(module: torch.nn.Module) -> tuple[List[str], int, int, int, int]:
+    trainable_names: List[str] = []
+    total_tensors = 0
+    trainable_tensors = 0
+    total_params = 0
+    trainable_params = 0
+    for name, param in module.named_parameters():
+        total_tensors += 1
+        total_params += int(param.numel())
+        if getattr(param, "requires_grad", False):
+            trainable_names.append(name)
+            trainable_tensors += 1
+            trainable_params += int(param.numel())
+    return trainable_names, total_tensors, trainable_tensors, total_params, trainable_params
+
+
+class SparseDrivePolicy(SparseDriveRLAdapterMixin, SparseDriveCandidateAdapterMixin, Agent):
     """RL policy wrapper around SparseDrive planning head.
 
     This wrapper exposes the same replay/logp semantics used by PPO in this repo.
@@ -64,13 +299,23 @@ class SparseDrivePolicy(Agent):
         device: str | None = None,
         rl_lr: float = 1e-5,
         execute_mode: str = "first_step",
+        trainable_prefixes: Sequence[str] | None = None,
+        frozen_prefixes: Sequence[str] | None = None,
+        nuscenes_scorer_config: Dict[str, Any] | None = None,
+        grpo_num_candidates: int | None = None,
     ) -> None:
         self.config_path = str(config_path)
         self.ckpt_path = str(ckpt_path)
         self._device_override = device
+        self._trainable_prefixes = _normalize_trainable_prefixes(trainable_prefixes)
+        self._frozen_prefixes = _normalize_trainable_prefixes(frozen_prefixes)
+        self._nuscenes_scorer_config = dict(nuscenes_scorer_config or {})
+        self._configured_grpo_num_candidates = grpo_num_candidates
+        self._nuscenes_pdm_scorer: Any | None = None
+        self._nuscenes_craft_scorer: Any | None = None
 
-        # Only one runtime mode is supported: continuous first-point execution.
-        # Keep `execute_mode` argument only for backward-compatible call sites.
+        if str(execute_mode).strip().lower() not in {"first_step", "continuous", "step1"}:
+            raise ValueError(f"Unsupported execute_mode for SparseDrive-v1: {execute_mode}")
         self._execute_mode = "continuous"
 
         # Lazy imports (mmcv/mmdet are heavy)
@@ -89,31 +334,23 @@ class SparseDrivePolicy(Agent):
 
         # cfg = ConfigDict.fromfile(self.config_path)
         cfg = Config.fromfile(self.config_path)
+        _rewrite_sparse_asset_paths(cfg, sparsedrive_root=_SPARSEDRIVE_ROOT)
         if getattr(cfg, "plugin", False):
             plugin_dir = getattr(cfg, "plugin_dir", None)
-            if plugin_dir:
-                _module_dir = os.path.dirname(str(plugin_dir))
-            else:
-                _module_dir = os.path.dirname(self.config_path)
-            # Support both relative and absolute plugin_dir.
-            # Example absolute path:
-            #   /root/clone/ReconDreamer-RL/SparseDrive/projects/mmdet3d_plugin/
-            # should map to import path:
-            #   projects.mmdet3d_plugin
-            _module_dir_abs = os.path.abspath(_module_dir)
-            _sparsedrive_abs = os.path.abspath(_SPARSEDRIVE_ROOT)
-            if _module_dir_abs.startswith(_sparsedrive_abs + os.sep):
-                rel = os.path.relpath(_module_dir_abs, _sparsedrive_abs)
-                _module_path = rel.replace(os.sep, ".")
-            else:
-                _module_path = _module_dir_abs.strip(os.sep).replace(os.sep, ".")
-
+            _module_path = _resolve_plugin_module_path(
+                config_path=self.config_path,
+                plugin_dir=(str(plugin_dir) if plugin_dir else None),
+                sparsedrive_root=_SPARSEDRIVE_ROOT,
+            )
             importlib.import_module(_module_path)
 
         # Build model   禁用 backbone 的预训练权重
         cfg.model.pretrained = None
         self._model = build_detector(cfg.model, test_cfg=cfg.get("test_cfg"))
-        _ = load_checkpoint(self._model, self.ckpt_path, map_location="cpu", strict=False)
+        if _checkpoint_has_agent_prefix(self.ckpt_path):
+            self.load_from_checkpoint(self.ckpt_path, strict=False)
+        else:
+            _ = load_checkpoint(self._model, self.ckpt_path, map_location="cpu", strict=False)
 
         # Find final input size from config (defaults to (256, 704) H,W)
         final_dim = None
@@ -143,6 +380,35 @@ class SparseDrivePolicy(Agent):
         #TODO: 这里是否考虑了command=3呢
         self._ego_fut_mode = int(ego_fut_mode) if ego_fut_mode is not None else 6
         self._ego_fut_ts = int(ego_fut_ts) if ego_fut_ts is not None else 6
+        if self._configured_grpo_num_candidates is None:
+            self._grpo_num_candidates = int(self._ego_fut_mode)
+        else:
+            self._grpo_num_candidates = max(0, int(self._configured_grpo_num_candidates or 0))
+
+        _apply_trainable_prefixes(
+            self._model,
+            self._trainable_prefixes,
+            frozen_prefixes=self._frozen_prefixes,
+        )
+        trainable_names, total_tensors, trainable_tensors, total_params, trainable_params = _summarize_parameter_status(
+            self._model
+        )
+        if len(self._trainable_prefixes) > 0:
+            print(
+                "[SparseDrivePolicy] trainable_prefixes="
+                f"{self._trainable_prefixes} frozen_prefixes={self._frozen_prefixes} "
+                f"-> trainable tensors {trainable_tensors}/{total_tensors}, "
+                f"trainable params {trainable_params}/{total_params}"
+            )
+            for name in trainable_names[-1:]:
+                print(f"[SparseDrivePolicy] trainable_param[-1]={name}")
+        else:
+            print(
+                "[SparseDrivePolicy] trainable_prefixes=[] "
+                f"frozen_prefixes={self._frozen_prefixes} -> training all currently-enabled "
+                "parameters except frozen prefixes: "
+                f"trainable tensors {trainable_tensors}/{total_tensors}, trainable params {trainable_params}/{total_params}"
+            )
 
         # Optimizer (optional; PPO update can use external optimizer too, but keep parity with ddv2)
         self._optimizer: torch.optim.Optimizer | None = None
@@ -254,7 +520,7 @@ class SparseDrivePolicy(Agent):
         m = self._model.module if isinstance(self._model, DDP) else self._model
         m.load_state_dict(sd2, strict=bool(strict))
 
-    # -------------------- core: build model inputs --------------------
+    #NOTE-------------------- core: build model inputs --------------------
     def _build_projection_mats(
         self,
         *,
@@ -320,7 +586,8 @@ class SparseDrivePolicy(Agent):
         return x
 
     def _build_batch(self, observation: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        cam_keys = ["front", "front_left", "front_right", "back_left", "back_right", "back"]
+        cam_keys = list(_SPARSEDRIVE_V1_CAMERA_ORDER)
+        cam_idx = [_HUGSIM_OBS_CAMERA_INDEX[k] for k in cam_keys]
         imgs = []
         for k in cam_keys:
             img = observation.get(k, None)
@@ -340,8 +607,18 @@ class SparseDrivePolicy(Agent):
         cam2ego = np.asarray(observation.get("cam2ego"), dtype=np.float32)
         cam_intr = np.asarray(observation.get("cam_intrinsics"), dtype=np.float32)
         cam_hw = observation.get("cam_hw", None)
+        if cam2ego.shape[0] >= max(cam_idx) + 1:
+            cam2ego = cam2ego[cam_idx]
+        if cam_intr.shape[0] >= max(cam_idx) + 1:
+            cam_intr = cam_intr[cam_idx]
         if cam_hw is not None:
             cam_hw = np.asarray(cam_hw, dtype=np.float32)
+            if cam_hw.shape[0] >= max(cam_idx) + 1:
+                cam_hw = cam_hw[cam_idx]
+
+        if _is_hugsim_observation(observation):
+            ego_pose = _hugsim_render_pose_to_sparsedrive_v1_lidar_global(ego_pose)
+            cam2ego = _hugsim_cam2ego_to_sparsedrive_v1_cam2lidar(cam2ego)
 
         img0 = imgs[0]
         h_cur, w_cur = int(img0.shape[0]), int(img0.shape[1])
@@ -354,20 +631,14 @@ class SparseDrivePolicy(Agent):
             net_hw=(h_net, w_net),
         )
 
-        #TODO:这里需要后续自己从数据集抓取真值补充
-        # Command: SparseDrive planning decoder uses 3 commands.  优先用 observation["driving_command"]
+        # Command: env/repo uses [left, straight, right, unknown], while
+        # SparseDrive-v1 was trained with [right, left, straight].
         cmd4 = np.asarray(observation.get("driving_command", np.zeros((4,), dtype=np.float32)), dtype=np.float32).reshape(-1)
-        if cmd4.shape[0] >= 3:
-            cmd3 = cmd4[:3].copy()
-        else:
+        if cmd4.shape[0] < 3:
             print("💣[attn in SparseDrPolicy] Warning: obs missing driving_command or has insufficient length, attempting to fill with zeros")
-            cmd3 = np.zeros((3,), dtype=np.float32)
-            cmd3[: cmd4.shape[0]] = cmd4
-        if not np.isfinite(cmd3).all():
+        if not np.isfinite(cmd4).all():
             print("💣[attn in SparseDrPolicy] Warning: obs has invalid driving_command, attempting to fill with zeros")
-            cmd3 = np.zeros((3,), dtype=np.float32)
-        if float(np.abs(cmd3).sum()) <= 1e-6:
-            cmd3[0] = 1.0
+        cmd3 = self._repo_command4_to_sparse_command3(cmd4)
 
         ego_status = np.asarray(observation.get("ego_status", np.zeros((8,), dtype=np.float32)), dtype=np.float32).reshape(-1)
         if ego_status.shape[0] < 8:
@@ -411,13 +682,52 @@ class SparseDrivePolicy(Agent):
                 out[k] = _as_float_tensor(v, device=device)
         return out
 
-    # -------------------- action conversion --------------------
-    #输入：（T,2)
+    @staticmethod
+    def _repo_command4_to_sparse_command3(command: Any) -> np.ndarray:
+        """Map repo command [left, straight, right, unknown] to SparseDrive-v1 [right, left, straight]."""
+        cmd4 = np.asarray(command, dtype=np.float32).reshape(-1)
+        if cmd4.shape[0] < 4:
+            padded = np.zeros((4,), dtype=np.float32)
+            padded[: cmd4.shape[0]] = cmd4
+            cmd4 = padded
+        if not np.isfinite(cmd4).all():
+            cmd4 = np.zeros((4,), dtype=np.float32)
+        cmd3 = np.asarray([cmd4[2], cmd4[0], cmd4[1]], dtype=np.float32)
+        if float(np.abs(cmd3).sum()) <= 1e-6:
+            cmd3[2] = 1.0
+        return cmd3
+
+    #NOTE -------------------- action conversion --------------------
+    @staticmethod
+    def _sparsedrive_lidar_xy_to_hugsim_action_xyyaw(traj_xy: np.ndarray) -> np.ndarray:
+        """Convert SparseDrive-v1 planner xy into the repo canonical ego frame.
+
+        SparseDrive-v1 planning is produced in its lidar/planner frame:
+        x points right and y points forward. The RL/env action contract used by
+        this repo stores ego-local plans as x forward, y left, yaw. HUGSIMReconEnv
+        converts that canonical plan back to the HUGSIM FIFO plan frame.
+        """
+        raw = np.asarray(traj_xy, dtype=np.float32)
+        if raw.ndim != 2 or raw.shape[0] <= 0 or raw.shape[1] < 2:
+            raise ValueError(f"Invalid SparseDrive-v1 trajectory shape: {raw.shape}")
+
+        canonical_xy = np.zeros((raw.shape[0], 2), dtype=np.float32)
+        canonical_xy[:, 0] = raw[:, 1]
+        canonical_xy[:, 1] = -raw[:, 0]
+
+        out = np.zeros((canonical_xy.shape[0], 3), dtype=np.float32)
+        out[:, :2] = canonical_xy
+        prev_xy = np.concatenate([np.zeros((1, 2), dtype=np.float32), canonical_xy[:-1]], axis=0)
+        dxy = canonical_xy - prev_xy
+        out[:, 2] = np.arctan2(dxy[:, 1], dxy[:, 0]).astype(np.float32)
+        return out
+
     def _build_env_action(self, *, traj_xy: np.ndarray) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-        first = traj_xy[0].astype(np.float32)#只取第一步去执行
+        traj_xyyaw = self._sparsedrive_lidar_xy_to_hugsim_action_xyyaw(traj_xy)
+        first = traj_xyyaw[0].astype(np.float32)#只取第一步去执行
         dx = float(first[0])
         dy = float(first[1])
-        yaw = float(np.arctan2(first[1], first[0])) if float(np.linalg.norm(first)) > 1e-6 else 0.0
+        yaw = float(first[2])
         debug: Dict[str, Any] = {
             "first_step_xy": torch.tensor([dx, dy], dtype=torch.float32),
             "first_step_yaw": torch.tensor([yaw], dtype=torch.float32),
@@ -456,155 +766,7 @@ class SparseDrivePolicy(Agent):
         traj = reg_raw.reshape(bs, 3, self._ego_fut_mode, self._ego_fut_ts, 2).cumsum(dim=-2)
         return cls[0], traj[0]
 
-    # -------------------- sampling / replay / logp --------------------
-    def sample_sparsedrive_with_replay(
-        self,
-        observation: Dict[str, Any],
-        *,
-        mode_idx: int = -1,
-        mode_select: str = "sample",
-        anchor_bank: Dict[str, Any] | None = None,
-    ) -> Tuple[Tuple[Any, ...], torch.Tensor, Dict[str, Any]]:
-        img_t, data = self._build_batch(observation)
-
-        model = self._model.module if isinstance(self._model, DDP) else self._model
-        model_device = self.device
-
-        img_t = img_t.to(model_device)
-        data_dev = self._to_model_metas(data, model_device)
-
-        model.eval()
-        with torch.inference_mode():
-            logits_all, traj_all = self._forward_raw_planning(img=img_t, data_dev=data_dev)
-        logits_all = logits_all.detach().cpu()
-        traj_all = traj_all.detach().cpu()
-
-        # select cmd index
-        cmd = data["gt_ego_fut_cmd"].detach().cpu().reshape(-1)
-        if cmd.numel() >= 3:
-            cmd_idx = int(torch.argmax(cmd[:3]).item())
-        else:
-            cmd_idx = 0
-
-        logits = logits_all[cmd_idx].reshape(-1)  # (ego_fut_mode,)
-        logp_all = torch.log_softmax(logits, dim=0)
-
-        if int(mode_idx) < 0:
-            sel = str(mode_select).strip().lower()
-            if sel in {"greedy", "max", "argmax"}:
-                mi = int(torch.argmax(logits).item())
-            else:
-                probs = torch.softmax(logits, dim=0)
-                if torch.isfinite(probs).all() and float(probs.sum().item()) > 0:
-                    mi = int(torch.distributions.Categorical(probs).sample().item())
-                else:
-                    mi = int(torch.argmax(logits).item())
-        else:
-            mi = max(0, min(int(mode_idx), int(logits.shape[0]) - 1))
-
-        lp = logp_all[mi]
-
-        # Select trajectory with exactly the same (cmd, mode) used for logp.
-        traj_xy = traj_all[cmd_idx, mi].reshape(-1, 2).numpy().astype(np.float32)
-
-        # Convert XY trajectory to XYYaw so replay keeps the executed pose representation.
-        traj_xyyaw = np.zeros((traj_xy.shape[0], 3), dtype=np.float32)
-        traj_xyyaw[:, :2] = traj_xy
-        prev_xy = np.concatenate([np.zeros((1, 2), dtype=np.float32), traj_xy[:-1]], axis=0)
-        #从sparsedrive拿到xy后自己计算yaw值
-        dxy = traj_xy - prev_xy
-        yaw = np.arctan2(dxy[:, 1], dxy[:, 0]).astype(np.float32)
-        traj_xyyaw[:, 2] = yaw
-        #trajxy的shape是（T,2）， traj_xyyaw的shape是（T,3）
-        #将prediction的xy轨迹转化成环境可执行的action格式（dx, dy, yaw, flag=2），这里只执行第一步的动作
-        #在这个build_env_action里面又重新计算了一下yaw值
-        action, exec_debug = self._build_env_action(traj_xy=traj_xy)
-
-        replay = {
-            "img": img_t.detach().cpu().clone(),
-            "projection_mat": data["projection_mat"].detach().cpu().clone(),
-            "image_wh": data["image_wh"].detach().cpu().clone(),
-            "T_global": data["T_global"].detach().cpu().clone(),
-            "T_global_inv": data["T_global_inv"].detach().cpu().clone(),
-            "timestamp": data["timestamp"].detach().cpu().clone(),
-            "ego_status": data["ego_status"].detach().cpu().clone(),
-            "gt_ego_fut_cmd": data["gt_ego_fut_cmd"].detach().cpu().clone(),
-            "img_metas": data["img_metas"],
-            "cmd_idx": int(cmd_idx),
-            "mode_idx": int(mi),
-            "final_planning": torch.from_numpy(traj_xy).detach().cpu().clone(),
-            "traj_xyyaw": torch.from_numpy(traj_xyyaw).detach().cpu().clone(),
-            "execute_mode": exec_debug.get("execute_mode", self._execute_mode),
-        }
-
-        return action, lp, replay
-
-    def sample_sparsedrive_with_replay_batch(
-        self,
-        observations: List[Dict[str, Any]],
-        *,
-        mode_idx: int = -1,
-        mode_select: str = "sample",
-        anchor_bank: Dict[str, Any] | None = None,
-    ) -> Tuple[List[Tuple[Any, ...]], List[torch.Tensor], List[Dict[str, Any]]]:
-        if len(observations) == 0:
-            return [], [], []
-
-        actions: List[Tuple[Any, ...]] = []
-        logps: List[torch.Tensor] = []
-        replays: List[Dict[str, Any]] = []
-        for obs in observations:
-            a, lp, rep = self.sample_sparsedrive_with_replay(
-                obs,
-                mode_idx=mode_idx,
-                mode_select=mode_select,
-                anchor_bank=anchor_bank,
-            )
-            actions.append(a)
-            logps.append(lp)
-            replays.append(rep)
-        return actions, logps, replays
-
-    def logp_from_replay(self, replay: Dict[str, Any], *, eta: float = 1.0) -> torch.Tensor:
-        # eta unused for SparseDrive; keep signature parity.
-        img = replay["img"]
-        data = {
-            "projection_mat": replay["projection_mat"],
-            "image_wh": replay["image_wh"],
-            "T_global": replay["T_global"],
-            "T_global_inv": replay["T_global_inv"],
-            "timestamp": replay["timestamp"],
-            "ego_status": replay["ego_status"],
-            "gt_ego_fut_cmd": replay["gt_ego_fut_cmd"],
-            "img_metas": replay.get("img_metas"),
-        }
-        if data["img_metas"] is None:
-            t_global = np.asarray(data["T_global"].detach().cpu().numpy()[0], dtype=np.float32)
-            t_global_inv = np.asarray(data["T_global_inv"].detach().cpu().numpy()[0], dtype=np.float32)
-            ts = float(data["timestamp"].detach().cpu().numpy().reshape(-1)[0])
-            data["img_metas"] = [
-                {
-                    "T_global": t_global,
-                    "T_global_inv": t_global_inv,
-                    "timestamp": np.float32(ts),
-                }
-            ]
-        mode_idx = int(replay.get("mode_idx", 0))
-        cmd_idx = int(replay.get("cmd_idx", 0))
-
-        model = self._model.module if isinstance(self._model, DDP) else self._model
-        model_device = self.device
-
-        img = img.to(model_device)
-        data_dev = self._to_model_metas(data, model_device)
-
-        model.eval()
-        logits_all, _traj_all = self._forward_raw_planning(img=img, data_dev=data_dev)
-        logits = logits_all[cmd_idx].reshape(-1)
-        lp = torch.log_softmax(logits, dim=0)[mode_idx]
-        return lp
-
-    # -------------------- Agent interface adapters --------------------
+    #NOTE -------------------- Agent interface adapters --------------------
     def initialize(self) -> None:
         return
 

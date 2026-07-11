@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
+
+# cd /root/clone/ReconDreamer-RL
+
+# bash script/run_train_eval_pipeline_hugsim_train_eval.sh \
+#   --reinforcepp-config /root/clone/ReconDreamer-RL/script/configs/sparsedrive/20260708_0915_HUGSM_collision_only_peak1e4_decay5e5_update32.yaml \
+#   --reinforcepp-algo-tag hugsim_sparsedrive_v1_collision_only_reinforcepp_nogrpo_noaux_peak1e4_decay5e5_update32 \
+#   --slots 0:0 1:1 2:2 3:3 4:4 5:5 6:6 7:7 \
+#   --max-scenes 88 \
+#   --repeat-evals 2
+
+
+
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_REINFORCEPP_CONFIG="$REPO_ROOT/script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl.yaml"
+DEFAULT_REINFORCEPP_CONFIG="$REPO_ROOT/script/configs/sparsedrive/20260708_0915_HUGSM_collision_only_peak1e4_decay5e5_update32.yaml"
 
 DEFAULT_EVAL_SEED=1
 HAS_EXPLICIT_REINFORCEPP_CONFIG=0
@@ -40,7 +52,7 @@ if [[ "$HAS_EXPLICIT_REINFORCEPP_CONFIG" == "0" ]]; then
   EXTRA_ARGS+=(--reinforcepp-config "$DEFAULT_REINFORCEPP_CONFIG")
 fi
 if [[ "$HAS_EXPLICIT_REINFORCEPP_ALGO_TAG" == "0" ]]; then
-  EXTRA_ARGS+=(--reinforcepp-algo-tag hugsim_ori_reinforcepp_craft_grpo)
+  EXTRA_ARGS+=(--reinforcepp-algo-tag hugsim_sparsedrive_v1_collision_only_reinforcepp_nogrpo_noaux_peak1e4_decay5e5_update32)
 fi
 if [[ "$HAS_EXPLICIT_SLOTS" == "0" ]]; then
   EXTRA_ARGS+=(--slots 0:0 1:1 2:2 3:3 4:4 5:5 6:6 7:7)

@@ -121,7 +121,7 @@ def _recon_xy_pose_to_reward_xz_pose(pose_xy: Any) -> np.ndarray:
 
 
 class HUGSIMRewardProxy:
-    """State adapter consumed by ReconDreamer-RL TrackingRewardComputer."""
+    """Expose HUGSIM rollout state to the existing tracking reward computer."""
 
     def __init__(self, *, recon_data_root: str | Path = RECON_DATA_ROOT_DEFAULT) -> None:
         self.recon_data_root = Path(recon_data_root)
@@ -192,13 +192,18 @@ class HUGSIMRewardProxy:
         self.expert_pair = [np.asarray(p[:3, 3][[0, 2]], dtype=np.float64) for p in dense]
 
 
-def build_recondreamer_obs_from_hugsim(
+def build_hugsim_training_obs(
     *,
     hugsim_obs: dict[str, Any],
     hugsim_info: dict[str, Any],
     mapping: HUGSIMFrameMapping,
     hugsim_step_idx: int,
 ) -> dict[str, Any]:
+    """Build the training observation used by HUGSIM-first rollouts.
+
+    Field names intentionally keep the historical camera/status keys consumed
+    by SparseDrive policies: front/front_left/... and ego_status.
+    """
     out: dict[str, Any] = {}
     rgb = hugsim_obs.get("rgb", {})
     cam_params = hugsim_info.get("cam_params", {})
@@ -241,7 +246,7 @@ def build_recondreamer_obs_from_hugsim(
     out["frame_idx"] = np.int32(int(mapping.frame_idx))
     out["sample_token"] = str(mapping.sample_token)
     out["token"] = str(mapping.sample_token)
-    out["timestamp"] = np.float32(float(mapping.sample_relative_time_s))
+    out["timestamp"] = np.float32(float(mapping.hugsim_relative_time_s))
     out["hugsim_timestamp"] = np.float32(float(mapping.hugsim_relative_time_s))
     out["hugsim_step_idx"] = np.int32(int(hugsim_step_idx))
     out["official_scene_name"] = str(mapping.official_scene_name)
@@ -250,6 +255,57 @@ def build_recondreamer_obs_from_hugsim(
     out["cam_intrinsics"] = cam_intr
     out["cam_hw"] = cam_hw
     out["cam_distortions"] = cam_dist
+    return out
+
+
+def build_recondreamer_obs_from_hugsim(
+    *,
+    hugsim_obs: dict[str, Any],
+    hugsim_info: dict[str, Any],
+    mapping: HUGSIMFrameMapping,
+    hugsim_step_idx: int,
+) -> dict[str, Any]:
+    """Compatibility alias for older call sites/tests."""
+    return build_hugsim_training_obs(
+        hugsim_obs=hugsim_obs,
+        hugsim_info=hugsim_info,
+        mapping=mapping,
+        hugsim_step_idx=hugsim_step_idx,
+    )
+
+
+def _infer_hugsim_fifo_plan_lateral_convention(hugsim_repo: str | Path) -> str:
+    """Return the FIFO plan lateral convention expected by the HUGSIM repo.
+
+    Current HUGSIM converts FIFO plans from SparseDrive lidar coordinates
+    (right, forward) into controller coordinates (forward, left). Older
+    HUGSIM-ORI variants only swap axes, so their FIFO input must already carry
+    left-positive lateral values to reach the same controller frame.
+    """
+    sim_utils_path = Path(hugsim_repo) / "sim" / "utils" / "sim_utils.py"
+    try:
+        text = sim_utils_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return "right_forward"
+    if "ego_plan_traj[:, 1] *= -1" in text or "plan_traj_stats[1:, :2] = ego_plan_traj" in text:
+        return "right_forward"
+    if "plan_traj_stats[1:, :2] = plan_traj[:, [1,0]]" in text or "plan_traj_stats[1:, :2] = plan_traj[:, [1, 0]]" in text:
+        return "left_forward"
+    return "right_forward"
+
+
+def _canonical_local_xy_to_hugsim_fifo_plan(plan_local_xy: Any, *, lateral_convention: str = "right_forward") -> np.ndarray:
+    plan = np.asarray(plan_local_xy, dtype=np.float32)
+    if plan.ndim != 2 or plan.shape[1] < 2:
+        raise ValueError(f"Expected local plan with shape (N, >=2), got {plan.shape}")
+    out = plan[:, [1, 0]].copy()
+    convention = str(lateral_convention or "right_forward").strip().lower()
+    if convention in {"right_forward", "right", "sparsedrive_lidar"}:
+        out[:, 0] *= -1.0
+    elif convention in {"left_forward", "left", "legacy_hugsim_ori"}:
+        pass
+    else:
+        raise ValueError(f"Unsupported HUGSIM FIFO plan lateral convention: {lateral_convention!r}")
     return out
 
 
@@ -592,9 +648,18 @@ class HUGSIMFifoClient:
             raise RuntimeError("HUGSIM FIFO client step called before start")
         from framework.env_wrapper.fifo_io import write_fifo_payload
 
+        plan_arr = np.asarray(plan_traj, dtype=np.float32)
+        if plan_arr.ndim != 2 or plan_arr.shape[0] <= 0 or plan_arr.shape[1] < 2:
+            raise ValueError(
+                "HUGSIM FIFO client requires a non-empty plan_traj with shape (T, >=2); "
+                f"got shape={tuple(plan_arr.shape)}"
+            )
+        if not np.isfinite(plan_arr).all():
+            raise ValueError("HUGSIM FIFO client requires finite plan_traj values")
+
         write_fifo_payload(
             self.plan_pipe,
-            np.asarray(plan_traj, dtype=np.float32),
+            plan_arr,
             process=self.process,
             timeout_s=self.fifo_timeout_s,
             poll_interval_s=self.fifo_poll_interval_s,
@@ -674,6 +739,7 @@ class HUGSIMReconEnv:
         fifo_timeout_s: float = 300.0,
         fifo_poll_interval_s: float = 0.2,
         fifo_runner_path: str | Path = FIFO_RUNNER_DEFAULT,
+        ad: str = "sparsedrive_v2",
         substeps_per_rl_step: int = 2,
         cuda: int | None = None,
         min_gt_route_points: int = 2,
@@ -684,6 +750,7 @@ class HUGSIMReconEnv:
         self.raw_reward_cfg = reward_cfg or {}
         self.reward_cfg = select_reward_mode_cfg(self.raw_reward_cfg)
         self.hugsim_repo = str(hugsim_repo)
+        self._fifo_plan_lateral_convention = _infer_hugsim_fifo_plan_lateral_convention(self.hugsim_repo)
         self.substeps_per_rl_step = max(1, int(substeps_per_rl_step))
         self.launch_mode = str(launch_mode).strip().lower()
         if self.launch_mode != "fifo":
@@ -718,6 +785,7 @@ class HUGSIMReconEnv:
             output_dir=output_dir,
             pixi_cmd=pixi_cmd,
             runner_path=fifo_runner_path,
+            ad=ad,
             substeps_per_rl_step=self.substeps_per_rl_step,
             fifo_timeout_s=fifo_timeout_s,
             fifo_poll_interval_s=fifo_poll_interval_s,
@@ -989,7 +1057,7 @@ class HUGSIMReconEnv:
         self._last_hugsim_obs = hugsim_obs
         self._last_hugsim_info = hugsim_info
         mapping = self.scene_index.map_time(self.official_scene_name, float(hugsim_info.get("timestamp", 0.0)))
-        obs = build_recondreamer_obs_from_hugsim(
+        obs = build_hugsim_training_obs(
             hugsim_obs=hugsim_obs,
             hugsim_info=hugsim_info,
             mapping=mapping,
@@ -1020,15 +1088,18 @@ class HUGSIMReconEnv:
     def _plan_from_action(self, action: Any) -> np.ndarray:
         if isinstance(self._external_plan_local_xyyaw, np.ndarray) and self._external_plan_local_xyyaw.ndim == 2:
             plan = np.asarray(self._external_plan_local_xyyaw[:, :2], dtype=np.float32)
-            hugsim_plan = plan[:, [1, 0]].copy()
-            hugsim_plan[:, 0] *= -1.0
+            hugsim_plan = _canonical_local_xy_to_hugsim_fifo_plan(
+                plan,
+                lateral_convention=getattr(self, "_fifo_plan_lateral_convention", "right_forward"),
+            )
             self._external_plan_local_xyyaw = None
             return hugsim_plan
         if isinstance(action, (tuple, list)) and len(action) >= 3:
             first = np.asarray([[float(action[0]), float(action[1])]], dtype=np.float32)
-            hugsim_plan = first[:, [1, 0]].copy()
-            hugsim_plan[:, 0] *= -1.0
-            return hugsim_plan
+            return _canonical_local_xy_to_hugsim_fifo_plan(
+                first,
+                lateral_convention=getattr(self, "_fifo_plan_lateral_convention", "right_forward"),
+            )
         raise ValueError(f"Unsupported HUGSIM action format: {action!r}")
 
     def step(self, action: Any):
@@ -1044,7 +1115,7 @@ class HUGSIMReconEnv:
         self._last_hugsim_obs = hugsim_obs
         self._last_hugsim_info = hugsim_info
         mapping = self.scene_index.map_time(self.official_scene_name, float(hugsim_info.get("timestamp", 0.0)))
-        obs = build_recondreamer_obs_from_hugsim(
+        obs = build_hugsim_training_obs(
             hugsim_obs=hugsim_obs,
             hugsim_info=hugsim_info,
             mapping=mapping,

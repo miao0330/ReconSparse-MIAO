@@ -353,16 +353,14 @@ python -u script/train_eval_pipeline.py \
   --reinforcepp-config script/configs/sparsedrive_v2/202606151204_HUGSM_reinforcepp_closed_loop_steppath_hd_EncourageProgress_CollisionPenalty_advnorm_NoGRPOCraft_substeps1.yaml
 ```
 
-也可以使用 wrapper：
-
-```bash
-bash script/run_train_eval_pipeline.sh
-```
-
-或使用 HUGSIM-ORI 相关 wrapper：
+也可以使用两个明确的 train/eval wrapper：
 
 ```bash
 bash script/run_train_eval_pipeline_hugsim_ori.sh
+```
+
+```bash
+bash script/run_train_eval_pipeline_recon_train_hugsim_eval.sh
 ```
 
 默认只跑 ReinforcePP；如果要额外跑 PPO，给 `train_eval_pipeline.py` 加 `--ppo` 并传入 `--ppo-config`。
@@ -476,4 +474,3 @@ TRAINING_LOCK        # learner 更新 / 权重发布阶段的互斥标记
 - [`framework/rewards/README.md`](framework/rewards/README.md)：reward 计算与调试。
 
 训练框架环境配置可以参考 [GigaAI-research/ReconDreamer-RL](https://github.com/GigaAI-research/ReconDreamer-RL) 和 [swc-17/SparseDriveV2](https://github.com/swc-17/SparseDriveV2)。
-

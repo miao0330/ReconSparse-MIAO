@@ -44,20 +44,24 @@ def build_agent(cfg: Dict[str, Any], *, device: torch.device) -> Any:
     ckpt_path = resolve_repo_path(str(ckpt_path))
 
     if agent_type == "sparsedrive":
-        from framework.agent.policy_sparsedrive import SparseDrivePolicy
+        from framework.agent.sparsedrive_v1 import SparseDrivePolicy
 
         sparse_root = resolve_ego_ads_subdir("SparseDrive")
         config_path = agent_cfg.get("config", os.path.join(sparse_root, "projects", "configs", "sparsedrive_small_stage2.py"))
         config_path = resolve_repo_path(str(config_path))
+        trainable_prefixes = agent_cfg.get("trainable_prefixes", [])
+        frozen_prefixes = agent_cfg.get("frozen_prefixes", [])
         return SparseDrivePolicy(
             config_path=str(config_path),
             ckpt_path=str(ckpt_path),
             device=str(device),
             rl_lr=float(train_cfg.get("policy_lr", train_cfg.get("ddv2_lr", 1e-5))),
             execute_mode=policy_execute_mode,
+            trainable_prefixes=trainable_prefixes,
+            frozen_prefixes=frozen_prefixes,
         )
     if agent_type in {"sparsedrive_v2", "sparsedrivev2", "sdv2"}:
-        from framework.agent.policy_sparsedrive_v2 import SparseDriveV2Policy
+        from framework.agent.sparsedrive_v2 import SparseDriveV2Policy
 
         trainable_prefixes = agent_cfg.get("trainable_prefixes", [])
         frozen_prefixes = agent_cfg.get("frozen_prefixes", [])
@@ -78,7 +82,7 @@ def build_agent(cfg: Dict[str, Any], *, device: torch.device) -> Any:
             nuscenes_scorer_config=nuscenes_scorer_config,
             grpo_num_candidates=int(grpo_cfg.get("num_candidates", 0) or 0),
         )
-    from framework.agent.policy_diffusiondrivev2 import DiffusionDriveV2Policy
+    from framework.agent.diffusiondrive_v2 import DiffusionDriveV2Policy
 
     return DiffusionDriveV2Policy(
         ckpt_path=str(ckpt_path),

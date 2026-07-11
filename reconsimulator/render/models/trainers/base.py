@@ -690,13 +690,14 @@ class BasicTrainer(nn.Module):
     def resume_from_checkpoint(
         self,
         ckpt_path: str,
-        load_only_model: bool=True
+        load_only_model: bool=True,
+        map_location=None,
     ) -> None:
         """
         Load model from checkpoint.
         """
         logger.info(f"Loading checkpoint from {ckpt_path}")
-        state_dict = torch.load(ckpt_path)
+        state_dict = torch.load(ckpt_path, map_location=map_location)
         self.load_state_dict(state_dict, load_only_model=load_only_model, strict=True)
         
     def save_checkpoint(

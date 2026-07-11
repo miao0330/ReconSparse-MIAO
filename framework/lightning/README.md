@@ -41,7 +41,7 @@ Lightning 侧 learner handoff 配置。
 通用训练模块。
 
 - 在 training_step 中根据 algo_kind 分流到 PPO 或 Reinforce 目标函数。
-- 调用 algorithms/trajectory_policy_core.py 计算 loss 和 metrics。
+- 调用 algorithms/ppo.py、reinforcepp.py、sac.py、grpo.py 计算 loss 和 metrics。
 - 在 `configure_optimizers()` 中主动创建当前训练用 optimizer。
 - 这是 Learner 真正执行反向传播时最直接的训练步入口。
 

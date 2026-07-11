@@ -1,50 +1,26 @@
 #!/usr/bin/env python3
-"""Generate one closed-loop rollout video with SparseDriveV2 in ReconSimulator.
+"""SparseDriveV2 rollout video visualizer.
 
-Pipeline per step:
-1) Use current observation to run SparseDriveV2 planner.
-2) Execute only the first point as env continuous action (flag=2).
-3) Re-plan at next step.
+Writes the rollout mp4 and lightweight CSV/plot artifacts without saving
+per-step candidate trajectory screenshots.
 
-Unavailable parts are kept as placeholders (e.g., exact mode log-prob from V2).
-
-
-Reward detail output:
-
---reward-detail-format ipynb
-The default is ipynb. To disable generation for a run, use:
-
---reward-detail-format none
-
+Command:
 cd /root/clone/ReconDreamer-RL
-
-# Generate an online reward visualization video.
-
-CUDA_VISIBLE_DEVICES=1 python tools/smalltool/visualize/generate_video_sparsedrive_v2.py \
-  --scene 123 \
+python tools/smalltool/visualize/sparsedrive_v2/visualize.py \
   --config /root/clone/ReconDreamer-RL/script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl.yaml \
   --ckpt /root/clone/ReconDreamer-RL/egoADs/SparseDriveV2/ckpt/sparsedrive_navsimv2.ckpt \
-  --out /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/scene123_CraftGrpo+CraftCloseReward.ipynb.mp4 \
-  --traj-csv /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/scene123_CraftGrpo+CraftCloseReward_bev.csv \
-  --traj-plot /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/scene123_expert_vs_ego_traj_bev.svg \
-  --reward-detail-format ipynb \
-  --save-keyframes \
-  --debug
+  --hugsim-scene scene-0166-easy-00 \
+  --horizon 32 \
+  --fps 2 \
+  --cuda 0 \
+  --mode-select greedy
 
-Render an existing shard:
-python tools/smalltool/visualize/generate_video_sparsedrive_v2.py \
-  --from-shard /root/clone/ReconDreamer-RL/outputs/actor_learner_reinforcepp_craft_safety/buffer/consumed/actor0_e0_v16_t1779248747_8378e3e7.pt \
-  --out /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/actor0_e0_v16_t1779248747_8378e3e7_shard_replay.mp4 \
-  --traj-csv /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/actor0_e0_v16_t1779248747_8378e3e7_shard_plan.csv \
-  --traj-plot /root/clone/ReconDreamer-RL/outputs/RewardCheckandVideo/actor0_e0_v16_t1779248747_8378e3e7_shard_bev.svg \
-  --reward-detail-format ipynb \
-  --save-keyframes
-  
-Minimal example:
-CUDA_VISIBLE_DEVICES=1 python tools/smalltool/visualize/generate_video_sparsedrive_v2.py \
-  --scene 36 \
+Alternate command using an exact HUGSIM scene:
+python tools/smalltool/visualize/sparsedrive_v2/visualize.py \
+  --hugsim-scene scene-0411-medium-00 \
   --config /root/clone/ReconDreamer-RL/script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl.yaml \
-  --ckpt /root/clone/ReconDreamer-RL/egoADs/SparseDriveV2/ckpt/sparsedrive_navsimv2.ckpt
+  --ckpt /root/clone/ReconDreamer-RL/egoADs/SparseDriveV2/ckpt/sparsedrive_navsimv2.ckpt \
+  --mode-select greedy
 """
 
 from __future__ import annotations
@@ -67,7 +43,7 @@ import json
 from shapely.geometry import Polygon
 
 
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -132,6 +108,7 @@ def _resolve_repo_path(path: str) -> str:
 
 _DEFAULT_CKPT = os.path.join(_resolve_ego_ads_subdir("SparseDriveV2"), "ckpt", "sparsedrive_navsimv2.ckpt")
 _DEFAULT_OUTPUT_ROOT = os.path.join(_REPO_ROOT, "outputs", "RewardCheckandVideo")
+_DEFAULT_HUGSIM_OUTPUT_ROOT = os.path.join(_DEFAULT_OUTPUT_ROOT, "HUGSIM", "sparsedrive-v2")
 
 
 def _lazy_import_runtime() -> tuple[Any, Any]:
@@ -174,6 +151,27 @@ def _build_auto_run_paths(
         "video_path": os.path.join(artifacts_dir, f"scene{int(scene):03d}_{timestamp}_sparsedrivev2_rollout.mp4"),
         "traj_csv": os.path.join(artifacts_dir, f"scene{int(scene):03d}_{timestamp}_sparsedrivev2_plan_frontframe.csv"),
         "traj_plot": os.path.join(artifacts_dir, f"scene{int(scene):03d}_{timestamp}_sparsedrivev2_expert_vs_ego_traj.svg"),
+    }
+
+
+def _build_hugsim_shard_run_paths(
+    *,
+    timestamp: str,
+    output_root: str = _DEFAULT_HUGSIM_OUTPUT_ROOT,
+    label: str = "hugsim_ori",
+) -> Dict[str, str]:
+    safe_label = str(label or "hugsim_ori").strip().replace(os.sep, "_").replace(" ", "_")
+    scene_dir = os.path.join(str(output_root), f"{safe_label}-{timestamp}")
+    artifacts_dir = os.path.join(scene_dir, "artifacts")
+    stem = f"{safe_label}_{timestamp}"
+    return {
+        "run_dir": scene_dir,
+        "artifacts_dir": artifacts_dir,
+        "run_manifest": os.path.join(scene_dir, "run_info.md"),
+        "shard_path": os.path.join(artifacts_dir, f"{stem}_actor_learner_shard.pt"),
+        "video_path": os.path.join(artifacts_dir, f"{stem}_hugsim_online.mp4"),
+        "traj_csv": os.path.join(artifacts_dir, f"{stem}_shard_plan.csv"),
+        "traj_plot": os.path.join(artifacts_dir, f"{stem}_shard_bev.svg"),
     }
 
 
@@ -311,7 +309,7 @@ def _save_reward_detail_notebook(
     cells: List[Dict[str, Any]] = [
         _new_markdown_cell(
             f"# Scene {int(scene):03d} Reward Detail\n\n"
-            "This notebook is generated by `generate_video_sparsedrive_v2.py` during rollout export.\n\n"
+            "This notebook is generated by `tools/smalltool/visualize/sparsedrive_v2/visualize.py` during rollout export.\n\n"
             f"- video: `{video_path}`\n"
             f"- reward_csv: `{reward_csv_path}`\n"
             f"- debug_shard: `{debug_shard_path}`\n"
@@ -368,6 +366,19 @@ def _grid_frame(observation: Dict[str, np.ndarray]) -> np.ndarray:
     row1 = np.concatenate(imgs[:3], axis=1)
     row2 = np.concatenate(imgs[3:], axis=1)
     return np.concatenate([row1, row2], axis=0)
+
+
+def _grid_frame_available_cameras(observation: Dict[str, np.ndarray]) -> np.ndarray:
+    front_keys = ["front_left", "front", "front_right"]
+    rear_keys = ["back_left", "back", "back_right"]
+    if all(k in observation for k in front_keys + rear_keys):
+        return _grid_frame(observation)
+    if all(k in observation for k in front_keys):
+        return np.concatenate([np.asarray(observation[k], dtype=np.uint8) for k in front_keys], axis=1)
+    available = [k for k in front_keys + rear_keys if k in observation]
+    if not available:
+        raise RuntimeError("Observation has no camera images to render")
+    return np.concatenate([np.asarray(observation[k], dtype=np.uint8) for k in available], axis=1)
 
 
 def _obs_tensor_to_camera_observation(obs_t: Any) -> Dict[str, np.ndarray]:
@@ -613,8 +624,8 @@ def _draw_collision_bev(
         rel = np.asarray(poly_xy, dtype=np.float64) - ego_xy[None, :]
         loc = rel @ R.T
         px = np.zeros_like(loc)
-        px[:, 0] = cx + loc[:, 0] * scale
-        px[:, 1] = cy - loc[:, 1] * scale
+        px[:, 0] = cx - loc[:, 1] * scale
+        px[:, 1] = cy - loc[:, 0] * scale
         return px.astype(np.int32)
 
     ego_poly = _ego_poly_world(world_pose)
@@ -648,6 +659,194 @@ def _draw_collision_bev(
             cv2.polylines(out, [px.reshape(-1, 1, 2)], True, clr, 1)
 
     cv2.putText(out, "BEV collision view", (x0 + 8, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+    return out, collided_tokens
+
+
+def _hugsim_box_poly_xy(box: Any) -> np.ndarray:
+    """HUGSIM box format is [x, y, z, width, length, height, yaw]."""
+    arr = np.asarray(box, dtype=np.float64).reshape(-1)
+    if arr.shape[0] < 7:
+        raise ValueError(f"Expected HUGSIM box with 7 values, got {arr.shape[0]}")
+    x, y, _z, width, length, _height, yaw = [float(v) for v in arr[:7]]
+    c, s = float(np.cos(yaw)), float(np.sin(yaw))
+    offsets = np.asarray(
+        [
+            [length * 0.5, width * 0.5],
+            [length * 0.5, -width * 0.5],
+            [-length * 0.5, -width * 0.5],
+            [-length * 0.5, width * 0.5],
+        ],
+        dtype=np.float64,
+    )
+    R = np.asarray([[c, -s], [s, c]], dtype=np.float64)
+    return (offsets @ R.T) + np.asarray([[x, y]], dtype=np.float64)
+
+
+def _draw_hugsim_box_bev(
+    frame: np.ndarray,
+    *,
+    ego_box: Any,
+    obj_boxes: Any,
+    collision: bool = False,
+    view_m: float = 25.0,
+) -> tuple[np.ndarray, List[str]]:
+    try:
+        import cv2
+    except Exception:
+        return frame, []
+
+    try:
+        ego_arr = np.asarray(ego_box, dtype=np.float64).reshape(-1)
+        ego_poly = _hugsim_box_poly_xy(ego_arr)
+    except Exception:
+        return frame, []
+
+    out = frame.copy()
+    h, w = out.shape[:2]
+    box_w, box_h = min(320, max(120, w - 20)), min(320, max(120, h - 20))
+    x0, y0 = w - box_w - 10, 10
+    cv2.rectangle(out, (x0, y0), (x0 + box_w, y0 + box_h), (20, 20, 20), -1)
+    cv2.rectangle(out, (x0, y0), (x0 + box_w, y0 + box_h), (120, 120, 120), 1)
+
+    ego_xy = ego_arr[:2].astype(np.float64, copy=False)
+    ego_yaw = float(ego_arr[6])
+    c, s = float(np.cos(-ego_yaw)), float(np.sin(-ego_yaw))
+    R = np.asarray([[c, -s], [s, c]], dtype=np.float64)
+    scale = float(min(box_w, box_h) * 0.45 / max(1e-6, view_m))
+    cx, cy = x0 + box_w // 2, y0 + box_h // 2
+
+    def hugsim_to_px(poly_xy: np.ndarray) -> np.ndarray:
+        rel = np.asarray(poly_xy, dtype=np.float64) - ego_xy[None, :]
+        loc = rel @ R.T
+        px = np.zeros_like(loc)
+        px[:, 0] = cx - loc[:, 1] * scale
+        px[:, 1] = cy - loc[:, 0] * scale
+        return px.astype(np.int32)
+
+    ego_shape = Polygon(ego_poly.tolist())
+    ego_px = hugsim_to_px(ego_poly)
+    cv2.polylines(out, [ego_px.reshape(-1, 1, 2)], True, (255, 255, 255), 2)
+    cv2.putText(
+        out,
+        "EGO",
+        (int(np.mean(ego_px[:, 0])) + 4, int(np.mean(ego_px[:, 1])) - 4),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    collided_tokens: List[str] = []
+    obj_iter = [] if obj_boxes is None else obj_boxes
+    for idx, obj_box in enumerate(obj_iter):
+        try:
+            obj_poly = _hugsim_box_poly_xy(obj_box)
+            obj_shape = Polygon(obj_poly.tolist())
+        except Exception:
+            continue
+        is_hit = bool(ego_shape.intersects(obj_shape))
+        token = f"obj{idx}"
+        px = hugsim_to_px(obj_poly)
+        if is_hit:
+            collided_tokens.append(token)
+            overlay = out.copy()
+            cv2.fillPoly(overlay, [px.reshape(-1, 1, 2)], (255, 0, 0))
+            out = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
+            cv2.polylines(out, [px.reshape(-1, 1, 2)], True, (255, 0, 0), 2)
+            ccx, ccy = int(np.mean(px[:, 0])), int(np.mean(px[:, 1]))
+            cv2.putText(out, "HIT", (ccx + 3, ccy - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 80, 80), 1, cv2.LINE_AA)
+        else:
+            cv2.polylines(out, [px.reshape(-1, 1, 2)], True, (0, 200, 255), 1)
+
+    label = "HUGSIM BEV boxes"
+    if bool(collision) and not collided_tokens:
+        label += " collision"
+    cv2.putText(out, label, (x0 + 8, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+    return out, collided_tokens
+
+
+def _draw_aligned_recon_global_bev(
+    frame: np.ndarray,
+    *,
+    ego_poly: Any,
+    hugsim_objects: Any,
+    recon_objects: Any,
+    view_m: float = 25.0,
+) -> tuple[np.ndarray, List[str]]:
+    try:
+        import cv2
+    except Exception:
+        return frame, []
+
+    try:
+        ego_poly_arr = np.asarray(ego_poly, dtype=np.float64)
+        if ego_poly_arr.ndim != 2 or ego_poly_arr.shape[0] < 3 or ego_poly_arr.shape[1] != 2:
+            return frame, []
+    except Exception:
+        return frame, []
+
+    out = frame.copy()
+    h, w = out.shape[:2]
+    box_w, box_h = min(320, max(120, w - 20)), min(320, max(120, h - 20))
+    x0, y0 = w - box_w - 10, 10
+    cv2.rectangle(out, (x0, y0), (x0 + box_w, y0 + box_h), (20, 20, 20), -1)
+    cv2.rectangle(out, (x0, y0), (x0 + box_w, y0 + box_h), (120, 120, 120), 1)
+
+    ego_xy = np.mean(ego_poly_arr, axis=0)
+    front_mid = 0.5 * (ego_poly_arr[0] + ego_poly_arr[1])
+    rear_mid = 0.5 * (ego_poly_arr[2] + ego_poly_arr[3])
+    heading = front_mid - rear_mid
+    ego_yaw = float(np.arctan2(float(heading[1]), float(heading[0]))) if float(np.linalg.norm(heading)) > 1.0e-9 else 0.0
+    c, s = float(np.cos(-ego_yaw)), float(np.sin(-ego_yaw))
+    R = np.asarray([[c, -s], [s, c]], dtype=np.float64)
+    scale = float(min(box_w, box_h) * 0.45 / max(1e-6, view_m))
+    cx, cy = x0 + box_w // 2, y0 + box_h // 2
+
+    def world_to_px(poly_xy: np.ndarray) -> np.ndarray:
+        rel = np.asarray(poly_xy, dtype=np.float64) - ego_xy[None, :]
+        loc = rel @ R.T
+        px = np.zeros_like(loc)
+        px[:, 0] = cx - loc[:, 1] * scale
+        px[:, 1] = cy - loc[:, 0] * scale
+        return px.astype(np.int32)
+
+    ego_shape = Polygon(ego_poly_arr.tolist())
+    ego_px = world_to_px(ego_poly_arr)
+    cv2.polylines(out, [ego_px.reshape(-1, 1, 2)], True, (255, 255, 255), 2)
+    cv2.putText(out, "EGO", (int(np.mean(ego_px[:, 0])) + 4, int(np.mean(ego_px[:, 1])) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    collided_tokens: List[str] = []
+    draw_items: list[tuple[dict[str, Any], tuple[int, int, int]]] = []
+    for obj in [] if hugsim_objects is None else hugsim_objects:
+        if isinstance(obj, dict):
+            draw_items.append((obj, (0, 220, 255)))
+    for obj in [] if recon_objects is None else recon_objects:
+        if isinstance(obj, dict):
+            draw_items.append((obj, (255, 165, 0)))
+
+    for obj, color in draw_items:
+        poly = obj.get("poly", None)
+        if not (isinstance(poly, list) and len(poly) >= 3):
+            continue
+        try:
+            poly_xy = np.asarray(poly, dtype=np.float64)
+            shp = Polygon(poly_xy.tolist())
+        except Exception:
+            continue
+        is_hit = bool(ego_shape.intersects(shp))
+        token = str(obj.get("token", obj.get("id", "unknown")))
+        px = world_to_px(poly_xy)
+        if is_hit:
+            collided_tokens.append(token)
+            overlay = out.copy()
+            cv2.fillPoly(overlay, [px.reshape(-1, 1, 2)], (255, 0, 0))
+            out = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
+            cv2.polylines(out, [px.reshape(-1, 1, 2)], True, (255, 0, 0), 2)
+        else:
+            cv2.polylines(out, [px.reshape(-1, 1, 2)], True, color, 1)
+
+    cv2.putText(out, "Aligned Recon BEV", (x0 + 8, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
     return out, collided_tokens
 
 
@@ -735,9 +934,12 @@ def _ensure_obs_for_sparsedrive_v2(obs: Dict[str, Any], sim: Any) -> Dict[str, A
 
 
 def _traj_xyyaw_from_replay(replay: Dict[str, Any]) -> np.ndarray:
-    traj = replay.get("traj_xyyaw", None)
+    env_replay = replay.get("env", {}) if isinstance(replay, dict) else {}
+    traj = env_replay.get("plan_xyyaw", None) if isinstance(env_replay, dict) else None
     if traj is None:
-        raise RuntimeError("Replay missing traj_xyyaw")
+        traj = replay.get("traj_xyyaw", None)
+    if traj is None:
+        raise RuntimeError("Replay missing env.plan_xyyaw/traj_xyyaw")
     if torch.is_tensor(traj):
         arr = traj.detach().cpu().numpy()
     else:
@@ -1048,7 +1250,7 @@ def _export_shard_replay(args: argparse.Namespace) -> None:
         raise RuntimeError("Shard has no steps to render")
     fps = float(args.fps) if args.fps is not None else 2.0
 
-    print("==== generate_video_sparsedrive_v2 shard replay ====")
+    print("==== sparsedrive_v2 visualize shard replay ====")
     print(f"from_shard={shard_path}")
     print(f"steps={max_steps} fps={fps:.3f}")
     print(f"out_video={out_path}")
@@ -1186,7 +1388,507 @@ def _export_shard_replay(args: argparse.Namespace) -> None:
     print("==== shard replay done ====")
 
 
-def main() -> None:
+def _resolve_hugsim_collect_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    train_cfg = cfg.get("train", {}) if isinstance(cfg, dict) else {}
+    horizon = getattr(args, "horizon", None)
+    if horizon is None:
+        horizon = 32
+    mode_select = getattr(args, "mode_select", None)
+    if mode_select is None:
+        mode_select = train_cfg.get("policy_mode_select", train_cfg.get("ddv2_mode_select", "sample"))
+    return {
+        "horizon": int(horizon),
+        "eta": float(train_cfg.get("eta", train_cfg.get("ddv2_eta", 1.0))),
+        "mode_idx": int(train_cfg.get("mode_idx", train_cfg.get("ddv2_mode_idx", -1))),
+        "mode_select": str(mode_select).strip().lower(),
+    }
+
+
+def _resolve_hugsim_online_output_paths(args: argparse.Namespace, paths: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "out": args.out or paths["video_path"],
+        "traj_csv": args.traj_csv or paths["traj_csv"],
+        "traj_plot": args.traj_plot or paths["traj_plot"],
+    }
+
+
+def _build_collected_shard_replay_args(
+    args: argparse.Namespace,
+    shard_path: str,
+    paths: Dict[str, str],
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        from_shard=str(shard_path),
+        out=(args.out or paths["video_path"]),
+        traj_csv=(args.traj_csv or paths["traj_csv"]),
+        traj_plot=(args.traj_plot or paths["traj_plot"]),
+        fps=args.fps,
+        reward_detail_format=args.reward_detail_format,
+        save_keyframes=bool(args.save_keyframes),
+        keyframes_k=int(args.keyframes_k),
+    )
+
+
+def _first_hugsim_label(cfg: Dict[str, Any]) -> str:
+    env_cfg = cfg.get("env", {}) if isinstance(cfg, dict) else {}
+    hugsim_cfg = env_cfg.get("hugsim", {}) if isinstance(env_cfg, dict) else {}
+    scenes = hugsim_cfg.get("scenes", None) if isinstance(hugsim_cfg, dict) else None
+    if isinstance(scenes, list) and scenes:
+        return str(scenes[0])
+    return "hugsim_ori"
+
+
+def _render_hugsim_online_bev(
+    frame: np.ndarray,
+    *,
+    traj_xyyaw: np.ndarray | None,
+    world_pose: np.ndarray | None,
+    snap: Dict[str, Any] | None,
+    draw_collision_bev: bool,
+    hugsim_ego_box: Any | None = None,
+    hugsim_obj_boxes: Any | None = None,
+    hugsim_collision: bool = False,
+    aligned_ego_poly: Any | None = None,
+    hugsim_recon_objects: Any | None = None,
+    recon_cache_objects: Any | None = None,
+) -> tuple[np.ndarray, List[str]]:
+    if bool(draw_collision_bev) and aligned_ego_poly is not None:
+        return _draw_aligned_recon_global_bev(
+            frame,
+            ego_poly=aligned_ego_poly,
+            hugsim_objects=[] if hugsim_recon_objects is None else hugsim_recon_objects,
+            recon_objects=[] if recon_cache_objects is None else recon_cache_objects,
+            view_m=25.0,
+        )
+    if bool(draw_collision_bev) and hugsim_ego_box is not None:
+        return _draw_hugsim_box_bev(
+            frame,
+            ego_box=hugsim_ego_box,
+            obj_boxes=[] if hugsim_obj_boxes is None else hugsim_obj_boxes,
+            collision=bool(hugsim_collision),
+            view_m=25.0,
+        )
+    if bool(draw_collision_bev) and world_pose is not None:
+        snap_payload = snap if isinstance(snap, dict) else {}
+        return _draw_collision_bev(frame, world_pose=np.asarray(world_pose, dtype=np.float64), snap=snap_payload, view_m=25.0)
+    return _draw_shard_plan_bev(frame, traj_xyyaw, view_m=25.0), []
+
+
+def _apply_cli_ckpt_override(cfg: Dict[str, Any], ckpt_path: str | None) -> None:
+    if ckpt_path is None:
+        return
+    agent_cfg = cfg.setdefault("agent", {})
+    if not isinstance(agent_cfg, dict):
+        raise RuntimeError("Config field `agent` must be a mapping when overriding --ckpt")
+    agent_cfg["ckpt"] = str(ckpt_path)
+
+
+def _format_hugsim_scene_name(scene: Any) -> str:
+    text = str(scene).strip()
+    if not text:
+        raise ValueError("Empty HUGSIM scene name")
+    if text.startswith("scene-"):
+        return text
+    try:
+        return f"scene-{int(text):04d}"
+    except ValueError:
+        return text
+
+
+def _apply_hugsim_scene_override(cfg: Dict[str, Any], args: argparse.Namespace) -> str | None:
+    scene_arg = getattr(args, "hugsim_scene", None)
+    if scene_arg is None:
+        scene_arg = getattr(args, "scene", None)
+    if scene_arg is None:
+        return None
+    scene_name = _format_hugsim_scene_name(scene_arg)
+    env_cfg = cfg.setdefault("env", {})
+    if not isinstance(env_cfg, dict):
+        raise RuntimeError("Config field `env` must be a mapping when overriding HUGSIM scene")
+    hugsim_cfg = env_cfg.setdefault("hugsim", {})
+    if not isinstance(hugsim_cfg, dict):
+        raise RuntimeError("Config field `env.hugsim` must be a mapping when overriding HUGSIM scene")
+    hugsim_cfg["scenes"] = [scene_name]
+    return scene_name
+
+
+def _build_hugsim_online_reward_row(
+    *,
+    step: int,
+    replay: Dict[str, Any],
+    logp: Any,
+    reward: float,
+    cum_reward: float,
+    done: bool,
+    info: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        traj_points = int(_traj_xyyaw_from_replay(replay).shape[0])
+    except Exception:
+        traj_points = 0
+    logp_v = float(logp.detach().cpu().item()) if torch.is_tensor(logp) else float(logp)
+    return {
+        "step": int(step),
+        "scene_id": _maybe_int(replay.get("scene_id", info.get("scene_id", info.get("scene", -1)))),
+        "frame_idx": _maybe_int(replay.get("frame_idx", -1)),
+        "frame_after": _maybe_int(info.get("frame_idx", info.get("now_frame", -1))),
+        "sample_token": str(replay.get("sample_token", "")),
+        "sample_token_after": str(info.get("sample_token", "")),
+        "timestamp_s": _maybe_float(replay.get("timestamp_s", 0.0)),
+        "mode_idx": _maybe_int(replay.get("mode_idx", -1)),
+        "old_logp": float(logp_v),
+        "reward": float(reward),
+        "cum_reward": float(cum_reward),
+        "done": bool(done),
+        "done_reason": str(info.get("done_reason", "")),
+        "progress_reward": _maybe_float(info.get("progress_reward", 0.0)),
+        "cost_reward": _maybe_float(info.get("cost_reward", 0.0)),
+        "traj_points": int(traj_points),
+    }
+
+
+def _apply_hugsim_online_reward_fallback(
+    *,
+    reward: float,
+    info: Dict[str, Any],
+    prev_route_completion: float | None,
+) -> tuple[float, float | None]:
+    if not isinstance(info, dict) or "hugsim_route_completion" not in info:
+        return float(reward), prev_route_completion
+    try:
+        route_completion = float(info["hugsim_route_completion"])
+    except Exception:
+        return float(reward), prev_route_completion
+
+    next_route_completion = route_completion
+    raw_reward = float(reward)
+    alignment_valid = info.get("hugsim_recon_alignment_valid", None) is True
+    if alignment_valid and math.isfinite(raw_reward):
+        return raw_reward, next_route_completion
+
+    reward_mode = str(info.get("reward_mode", "")).strip().lower()
+    lateral_error = _maybe_float(info.get("lateral_error_m", 0.0), 0.0)
+    mixed_step_path = bool(reward_mode == "step_path" and abs(float(lateral_error)) > 100.0)
+    near_zero_reward = abs(raw_reward) < 1.0e-8
+    nonfinite_reward = not math.isfinite(raw_reward)
+    if not bool(nonfinite_reward or mixed_step_path or (not alignment_valid and near_zero_reward)):
+        return raw_reward, next_route_completion
+
+    base_reward = _maybe_float(info.get("hugsim_base_reward", 0.0), 0.0)
+    if bool(info.get("collision", False)) and abs(float(base_reward)) > 1.0e-8:
+        fallback_reward = float(base_reward)
+    else:
+        prev = 0.0 if prev_route_completion is None else float(prev_route_completion)
+        fallback_reward = round(float(route_completion) - prev, 6)
+
+    info["raw_recondreamer_reward"] = raw_reward
+    info["invalid_recon_step_path"] = bool(mixed_step_path)
+    info["reward_mode"] = "hugsim_route_delta_fallback"
+    info["reward"] = float(fallback_reward)
+    info["progress_reward"] = float(fallback_reward)
+    info["cost_reward"] = 0.0
+    info["hugsim_route_completion_delta"] = float(fallback_reward)
+    return float(fallback_reward), next_route_completion
+
+
+def _collect_hugsim_shard_and_export(args: argparse.Namespace) -> None:
+    from framework.runner.agent_factory import build_agent
+    from framework.runner.env_factory import build_actor_env
+
+    config_path = _resolve_repo_path(str(args.config))
+    cfg = _load_yaml(config_path)
+    ckpt_path = _resolve_repo_path(str(args.ckpt)) if getattr(args, "ckpt", None) is not None else None
+    _apply_cli_ckpt_override(cfg, ckpt_path)
+    selected_hugsim_scene = _apply_hugsim_scene_override(cfg, args)
+    env_cfg = cfg.get("env", {}) if isinstance(cfg, dict) else {}
+    if str(env_cfg.get("backend", "")).strip().lower() != "hugsim_ori":
+        raise RuntimeError("--collect-hugsim-shard requires config env.backend: hugsim_ori")
+
+    device = torch.device(f"cuda:{int(args.cuda)}" if torch.cuda.is_available() and int(args.cuda) >= 0 else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(int(args.cuda))
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    paths = _build_hugsim_shard_run_paths(timestamp=ts, label=_first_hugsim_label(cfg))
+    output_paths = _resolve_hugsim_online_output_paths(args, paths)
+    shard_path = _resolve_repo_path(str(args.save_shard)) if args.save_shard else paths["shard_path"]
+    if args.save_shard:
+        _ensure_parent(shard_path)
+    for value in output_paths.values():
+        _ensure_parent(value)
+
+    defaults = _resolve_hugsim_collect_defaults(args, cfg)
+    actor_id = int(args.actor_id)
+    total_actors = int(args.total_actors) if args.total_actors is not None else 1
+    local_ver = int(args.local_ver)
+    shard_idx = int(args.shard_idx)
+
+    print("==== collect HUGSIM-ORI shard ====")
+    print(f"config={config_path}")
+    print(f"ckpt={ckpt_path or str((cfg.get('agent', {}) or {}).get('ckpt', ''))}")
+    if selected_hugsim_scene is not None:
+        print(f"hugsim_scene={selected_hugsim_scene}")
+    print(f"device={device}")
+    print(f"horizon={defaults['horizon']} eta={defaults['eta']} mode_idx={defaults['mode_idx']} mode_select={defaults['mode_select']}")
+    print(f"out_video={output_paths['out']}")
+    print(f"out_traj_csv={output_paths['traj_csv']}")
+    print(f"out_traj_plot={output_paths['traj_plot']}")
+    if args.save_shard:
+        print(f"save_shard={shard_path}")
+
+    env = build_actor_env(cfg, cuda=max(0, int(args.cuda)), actor_id=actor_id, total_actors=total_actors)
+    debug_shard: Dict[str, Any] = {
+        "reward": [],
+        "done": [],
+        "old_logp": [],
+        "replay": [],
+        "meta": [],
+    }
+    env_cache_by_scene: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    reward_rows: List[Dict[str, Any]] = []
+    traj_rows: List[Dict[str, Any]] = []
+    rendered_frames: List[np.ndarray] = []
+    writer = None
+    try:
+        agent = build_agent(cfg, device=device)
+        obs, reset_info = env.reset()
+        fps = float(args.fps) if args.fps is not None else 2.0
+        writer = imageio.get_writer(
+            output_paths["out"],
+            mode="I",
+            fps=float(fps),
+            macro_block_size=1,
+            codec="libx264",
+            ffmpeg_log_level="error",
+            input_params=["-framerate", str(float(fps))],
+            output_params=["-pix_fmt", "yuv420p"],
+        )
+
+        reward_sum = 0.0
+        prev_route_completion: float | None = None
+        done = False
+        step = 0
+        max_steps = None if int(defaults["horizon"]) <= 0 else int(defaults["horizon"])
+        while (max_steps is None or step < max_steps) and not done:
+            obs_decision = obs
+            action, logp, replay = agent.act(
+                obs_decision,
+                eta=float(defaults["eta"]),
+                mode_idx=int(defaults["mode_idx"]),
+                mode_select=str(defaults["mode_select"]),
+            )
+            try:
+                traj_xyyaw = _traj_xyyaw_from_replay(replay)
+            except Exception:
+                traj_xyyaw = None
+            setter = getattr(env, "set_external_plan_local_xyyaw", None)
+            if callable(setter) and traj_xyyaw is not None:
+                setter(np.asarray(traj_xyyaw, dtype=np.float32))
+
+            obs, reward, terminated, truncated, info_raw = env.step(action)
+            info = dict(info_raw or {})
+            done = bool(terminated or truncated)
+            reward, prev_route_completion = _apply_hugsim_online_reward_fallback(
+                reward=float(reward),
+                info=info,
+                prev_route_completion=prev_route_completion,
+            )
+            reward_sum += float(reward)
+            row = _build_hugsim_online_reward_row(
+                step=int(step),
+                replay=replay if isinstance(replay, dict) else {},
+                logp=logp,
+                reward=float(reward),
+                cum_reward=float(reward_sum),
+                done=bool(done),
+                info=info,
+            )
+            reward_rows.append(row)
+            debug_shard["reward"].append(float(reward))
+            debug_shard["done"].append(bool(done))
+            debug_shard["old_logp"].append(float(row["old_logp"]))
+            debug_shard["replay"].append(replay)
+            debug_shard["meta"].append({"step": int(step), "reset_info": _json_safe(reset_info), "info": _json_safe(info)})
+
+            if traj_xyyaw is not None:
+                for pt_idx in range(int(traj_xyyaw.shape[0])):
+                    traj_rows.append(
+                        {
+                            "step": int(step),
+                            "scene_id": row["scene_id"],
+                            "frame_idx": row["frame_idx"],
+                            "mode_idx": row["mode_idx"],
+                            "point_idx": int(pt_idx),
+                            "local_x": float(traj_xyyaw[pt_idx, 0]),
+                            "local_y": float(traj_xyyaw[pt_idx, 1]),
+                            "local_yaw": float(traj_xyyaw[pt_idx, 2]),
+                        }
+                    )
+
+            lines = [
+                f"hugsim step={step} scene={row['scene_id']} frame={row['frame_idx']}->{row['frame_after']}",
+                f"reward={float(row['reward']):.5f} cum_reward={float(row['cum_reward']):.5f} done={bool(row['done'])}",
+                f"mode_idx={row['mode_idx']} old_logp={float(row['old_logp']):.5f} sample={str(row['sample_token'])[:12]}",
+            ]
+            if any(
+                key in info
+                for key in (
+                    "recon_cache_frame_idx",
+                    "recon_cache_dynamic_frame_idx",
+                    "recon_cache_time_frame_idx",
+                )
+            ):
+                lines.append(
+                    "cache "
+                    f"map={_maybe_int(info.get('recon_cache_frame_idx', -1))} "
+                    f"dyn={_maybe_int(info.get('recon_cache_dynamic_frame_idx', -1))} "
+                    f"time={_maybe_int(info.get('recon_cache_time_frame_idx', -1))} "
+                    f"dyn_src={str(info.get('recon_cache_dynamic_frame_source', ''))}"
+                )
+            frame_out = _resize_frame_min_width(_grid_frame_available_cameras(obs), 960)
+            frame_out = _overlay_debug_text(frame_out, lines)
+            scene_id = _maybe_int(row.get("scene_id", -1))
+            frame_after = _maybe_int(row.get("frame_after", -1))
+            if scene_id not in env_cache_by_scene:
+                env_cache_by_scene[scene_id] = _load_env_cache(scene=scene_id) if scene_id >= 0 else {}
+            snap = env_cache_by_scene.get(scene_id, {}).get(frame_after)
+            world_pose = obs.get("ego_pose", None) if isinstance(obs, dict) else None
+            frame_out, hit_tokens = _render_hugsim_online_bev(
+                frame_out,
+                traj_xyyaw=traj_xyyaw,
+                world_pose=world_pose,
+                snap=snap,
+                draw_collision_bev=bool(args.draw_collision_bev),
+                hugsim_ego_box=info.get("ego_box"),
+                hugsim_obj_boxes=info.get("obj_boxes"),
+                hugsim_collision=bool(info.get("collision", False)),
+                aligned_ego_poly=info.get("hugsim_ego_box_recon_global_poly"),
+                hugsim_recon_objects=info.get("hugsim_obj_boxes_recon_global"),
+                recon_cache_objects=info.get("recon_cache_dynamic_objects"),
+            )
+            if hit_tokens:
+                row["collision_tokens"] = "|".join(str(v) for v in hit_tokens)
+                frame_out = _overlay_debug_text(frame_out, lines + [f"collision_tokens={','.join(str(v) for v in hit_tokens[:2])}"])
+            writer.append_data(frame_out)
+            rendered_frames.append(frame_out.copy())
+            step += 1
+
+        writer.close()
+        writer = None
+
+        _write_csv_rows(output_paths["traj_csv"], traj_rows)
+        reward_csv = os.path.splitext(output_paths["traj_csv"])[0] + "_step_reward.csv"
+        _write_csv_rows(reward_csv, reward_rows)
+        print(f"traj_saved={output_paths['traj_csv']}")
+        print(f"reward_csv_saved={reward_csv}")
+        if _save_shard_plan_plot(reward_rows, debug_shard["replay"], output_paths["traj_plot"]):
+            print(f"traj_plot_saved={output_paths['traj_plot']}")
+
+        reward_plot = os.path.splitext(output_paths["traj_plot"])[0] + "_reward_curve.png"
+        try:
+            xs = [int(r["step"]) for r in reward_rows]
+            ys = [float(r["reward"]) for r in reward_rows]
+            cs = [float(r["cum_reward"]) for r in reward_rows]
+            if xs:
+                fig, ax1 = plt.subplots(figsize=(9, 4), dpi=150)
+                ax1.plot(xs, ys, color="#d62728", label="step_reward")
+                ax1.axhline(0.0, color="#888888", linewidth=1.0)
+                ax2 = ax1.twinx()
+                ax2.plot(xs, cs, color="#1f77b4", label="cum_reward")
+                ax1.set_xlabel("step")
+                ax1.set_ylabel("reward")
+                ax2.set_ylabel("cum_reward")
+                ax1.set_title("HUGSIM-ORI Online Reward Curve")
+                fig.tight_layout()
+                fig.savefig(reward_plot)
+                plt.close(fig)
+                print(f"reward_plot_saved={reward_plot}")
+        except Exception as e:
+            print(f"[reward-plot] failed: {e}")
+
+        debug_shard_path = shard_path
+        if args.save_shard:
+            shard = {
+                "old_logp": torch.tensor(debug_shard["old_logp"], dtype=torch.float32),
+                "reward": torch.tensor(debug_shard["reward"], dtype=torch.float32),
+                "done": torch.tensor([1.0 if v else 0.0 for v in debug_shard["done"]], dtype=torch.float32),
+                "replay": debug_shard["replay"],
+                "meta": {
+                    "source": "hugsim_ori_visualize_online",
+                    "actor_id": actor_id,
+                    "horizon": int(defaults["horizon"]),
+                    "weights_version": local_ver,
+                    "shard_idx": shard_idx,
+                    "config_path": str(config_path),
+                    "reset_info": _json_safe(reset_info),
+                },
+            }
+            torch.save(shard, shard_path)
+            print(f"shard_saved={shard_path}")
+        else:
+            debug_shard_path = os.path.splitext(output_paths["traj_csv"])[0] + "_debug_shard.pt"
+            torch.save(debug_shard, debug_shard_path)
+            print(f"debug_shard_saved={debug_shard_path}")
+
+        if str(args.reward_detail_format) == "ipynb":
+            detail_ipynb = os.path.splitext(output_paths["traj_csv"])[0] + "_reward_detail.ipynb"
+            try:
+                first_scene = _maybe_int(reward_rows[0].get("scene_id", 0), 0) if reward_rows else 0
+                _save_reward_detail_notebook(
+                    out_path=detail_ipynb,
+                    scene=first_scene,
+                    reward_rows=reward_rows,
+                    debug_shard=debug_shard,
+                    reward_cfg={"source": "hugsim_ori_online", "config": config_path, "env_reward": env_cfg.get("reward", {})},
+                    video_path=output_paths["out"],
+                    reward_csv_path=reward_csv,
+                    debug_shard_path=debug_shard_path,
+                )
+                print(f"reward_detail_notebook_saved={detail_ipynb}")
+            except Exception as e:
+                print(f"[reward-detail-notebook] failed: {e}")
+
+        if bool(args.save_keyframes) and reward_rows and rendered_frames:
+            try:
+                key_root = os.path.splitext(output_paths["traj_plot"])[0] + "_keyframes"
+                os.makedirs(key_root, exist_ok=True)
+                order = sorted(range(len(reward_rows)), key=lambda i: float(reward_rows[i]["reward"]))
+                for idx in order[: max(1, int(args.keyframes_k))]:
+                    out_png = os.path.join(key_root, f"step{idx:03d}_reward{float(reward_rows[idx]['reward']):+.4f}.png")
+                    imageio.imwrite(out_png, rendered_frames[idx])
+                print(f"keyframes_saved={key_root}")
+            except Exception as e:
+                print(f"[keyframes] failed: {e}")
+    finally:
+        if writer is not None:
+            writer.close()
+        close_fn = getattr(env, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+    _write_run_manifest(
+        manifest_path=paths["run_manifest"],
+        scene=0,
+        config_path=config_path,
+        ckpt_path=str((cfg.get("agent", {}) or {}).get("ckpt", "")),
+        timestamp=ts,
+        extra_lines=[
+            "mode=collect_hugsim_shard",
+            f"artifacts_dir={paths['artifacts_dir']}",
+            f"video={output_paths['out']}",
+            f"traj_csv={output_paths['traj_csv']}",
+            f"traj_plot={output_paths['traj_plot']}",
+            f"horizon={int(defaults['horizon'])}",
+            f"hugsim_scene={_first_hugsim_label(cfg)}",
+            f"actor_id={actor_id}",
+            f"local_ver={local_ver}",
+        ],
+    )
+    print(f"video_saved={output_paths['out']}")
+    print("==== HUGSIM-ORI online visualization done ====")
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Generate SparseDriveV2 rollout video in 3DGS env")
     ap.add_argument(
         "--config",
@@ -1195,7 +1897,16 @@ def main() -> None:
         help="Config file providing env.reward and rollout defaults",
     )
     ap.add_argument("--from-shard", type=str, default=None, help="Render an existing actor-learner shard instead of running live policy rollout.")
+    ap.add_argument("--collect-hugsim-shard", action="store_true", default=True, help="Run SparseDriveV2 online in HUGSIM-ORI and visualize each collected step. Enabled by default for this HUGSIM helper.")
+    ap.add_argument("--no-collect-hugsim-shard", dest="collect_hugsim_shard", action="store_false", help="Use the legacy ReconSimulator online rollout path instead of HUGSIM collection.")
+    ap.add_argument("--save-shard", type=str, default=None, help="Optional .pt debug shard path for --collect-hugsim-shard.")
+    ap.add_argument("--horizon", type=int, default=32, help="Online visualization step count. Defaults to 32 steps at --fps 2, i.e. about 16s. Use 0 to run until env done.")
+    ap.add_argument("--actor-id", type=int, default=0)
+    ap.add_argument("--total-actors", type=int, default=None)
+    ap.add_argument("--local-ver", type=int, default=0)
+    ap.add_argument("--shard-idx", type=int, default=0)
     ap.add_argument("--scene", type=int, default=None)
+    ap.add_argument("--hugsim-scene", type=str, default=None, help="HUGSIM scene override for --collect-hugsim-shard, e.g. scene-0010 or scene-0038-hard-00.")
     ap.add_argument("--ckpt", type=str, default=_DEFAULT_CKPT)
     ap.add_argument("--out", type=str, default=None)
     ap.add_argument("--traj-csv", type=str, default=None)
@@ -1203,15 +1914,16 @@ def main() -> None:
     ap.add_argument("--start-frame", type=int, default=0)
     ap.add_argument("--step-frames", type=int, default=5)
     ap.add_argument("--duration-s", type=float, default=None)
-    ap.add_argument("--fps", type=float, default=None)
+    ap.add_argument("--fps", type=float, default=2.0)
     ap.add_argument("--cuda", type=int, default=0)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--render-w", type=int, default=None)
     ap.add_argument("--render-h", type=int, default=None)
-    ap.add_argument("--mode-select", type=str, default="greedy", choices=["greedy", "sample"])
+    ap.add_argument("--mode-select", type=str, default=None, choices=["greedy", "sample"])
     ap.add_argument("--expert-high", dest="expert_high", action="store_true", default=True)
     ap.add_argument("--no-expert-high", dest="expert_high", action="store_false")
-    ap.add_argument("--save-keyframes", action="store_true", help="Save low-reward keyframes as PNG")
+    ap.add_argument("--save-keyframes", dest="save_keyframes", action="store_true", default=True, help="Save low-reward keyframes as PNG")
+    ap.add_argument("--no-save-keyframes", dest="save_keyframes", action="store_false", help="Disable low-reward keyframe PNG export.")
     ap.add_argument("--keyframes-k", type=int, default=8)
     ap.add_argument("--draw-collision-bev", action="store_true", default=True)
     ap.add_argument(
@@ -1221,14 +1933,26 @@ def main() -> None:
         choices=["none", "ipynb"],
         help="Export detailed per-step reward report. Default writes an .ipynb next to the reward CSV.",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
+    return _build_arg_parser().parse_args(argv)
+
+
+def main() -> None:
+    args = _parse_args()
 
     if args.from_shard:
         _export_shard_replay(args)
         return
 
+    if args.collect_hugsim_shard:
+        _collect_hugsim_shard_and_export(args)
+        return
+
     if args.scene is None:
-        raise SystemExit("--scene is required unless --from-shard is used")
+        raise SystemExit("--scene is required unless --from-shard or --collect-hugsim-shard is used")
     scene = int(args.scene)
     RLReconEnv, SparseDriveV2Policy = _lazy_import_runtime()
     ckpt_path = _resolve_repo_path(str(args.ckpt))
@@ -1262,7 +1986,7 @@ def main() -> None:
             f"start_frame={int(args.start_frame)}",
             f"step_frames={int(args.step_frames)}",
             f"cuda={int(args.cuda)}",
-            f"mode_select={args.mode_select}",
+            f"mode_select={args.mode_select or 'greedy'}",
             f"reward_detail_format={args.reward_detail_format}",
         ],
     )
@@ -1293,10 +2017,11 @@ def main() -> None:
     max_steps = None if args.duration_s is None else max(1, int(round(float(args.duration_s) / step_dt_s)))
     fps = float(args.fps) if args.fps is not None else (1.0 / step_dt_s)
 
-    print("==== generate_video_sparsedrive_v2 ====")
+    print("==== sparsedrive_v2 visualize ====")
     print(f"scene={scene} start_frame={int(args.start_frame)} step_frames={int(args.step_frames)}")
     print(f"ckpt={ckpt_path}")
-    print(f"mode_select={args.mode_select}")
+    live_mode_select = args.mode_select or "greedy"
+    print(f"mode_select={live_mode_select}")
     print(f"use_expert_height={bool(args.expert_high)}")
     if args.duration_s is None:
         print(f"duration_s=until_done max_steps=none step_dt_s={step_dt_s:.3f} fps={fps:.3f}")
@@ -1363,7 +2088,7 @@ def main() -> None:
         action, logp, replay = policy.sample_sparsedrivev2_with_replay(
             obs_in,
             mode_idx=-1,
-            mode_select=str(args.mode_select),
+            mode_select=str(live_mode_select),
         )
 
         traj_xyyaw = _traj_xyyaw_from_replay(replay)

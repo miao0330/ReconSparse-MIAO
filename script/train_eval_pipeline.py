@@ -37,7 +37,8 @@ python -u script/train_eval_pipeline.py \
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HUGSIM_ROOT = Path(os.environ.get("HUGSIM_ROOT", "/root/clone/HUGSIM-ORI")).resolve()
-SPARSEDRIVE_CKPT_DIR = REPO_ROOT / "egoADs" / "SparseDriveV2" / "ckpt"
+SPARSEDRIVE_V1_CKPT_DIR = REPO_ROOT / "egoADs" / "SparseDrive" / "ckpt"
+SPARSEDRIVE_V2_CKPT_DIR = REPO_ROOT / "egoADs" / "SparseDriveV2" / "ckpt"
 DEFAULT_TRAIN_PYTHON = Path("/root/miniconda3/envs/recondreamerNew-rl/bin/python")
 DEFAULT_HUGSIM_TEMPLATE = HUGSIM_ROOT / "configs" / "sim" / "nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml"
 DEFAULT_SCENARIO_DIR = HUGSIM_ROOT / "configs" / "scenarios" / "nuscenes"
@@ -106,6 +107,34 @@ def _safe_name(text: str) -> str:
     return cleaned or "run"
 
 
+def resolve_agent_type(config: dict[str, Any]) -> str:
+    agent_cfg = config.get("agent", {}) or {}
+    raw_type = str(agent_cfg.get("type", "sparsedrive_v2")).strip().lower().replace("-", "_")
+    if raw_type in {"sparsedrive", "sparsedrive_v1", "sparsedrivev1", "sdv1"}:
+        return "sparsedrive_v1"
+    if raw_type in {"sparsedrive_v2", "sparsedrivev2", "sdv2"}:
+        return "sparsedrive_v2"
+    raise ValueError(f"Unsupported train/eval pipeline agent.type: {agent_cfg.get('type')!r}")
+
+
+def ckpt_dir_for_agent_type(agent_type: str) -> Path:
+    normalized = str(agent_type).strip().lower().replace("-", "_")
+    if normalized == "sparsedrive_v1":
+        return SPARSEDRIVE_V1_CKPT_DIR
+    if normalized == "sparsedrive_v2":
+        return SPARSEDRIVE_V2_CKPT_DIR
+    raise ValueError(f"Unsupported checkpoint agent type: {agent_type!r}")
+
+
+def eval_tool_for_agent_type(agent_type: str) -> Path:
+    normalized = str(agent_type).strip().lower().replace("-", "_")
+    if normalized == "sparsedrive_v1":
+        return REPO_ROOT / "tools" / "evaluate_existing_sparsedrive_v1_ckpts.py"
+    if normalized == "sparsedrive_v2":
+        return REPO_ROOT / "tools" / "evaluate_existing_sparsedrive_v2_ckpts.py"
+    raise ValueError(f"Unsupported evaluation agent type: {agent_type!r}")
+
+
 def build_run_tags(*, config: dict[str, Any], algo_tag: str) -> list[str]:
     normalized_config = copy.deepcopy(config)
     try:
@@ -119,6 +148,12 @@ def build_run_tags(*, config: dict[str, Any], algo_tag: str) -> list[str]:
     env_cfg = normalized_config.get("env", {}) or {}
     reward_cfg = env_cfg.get("reward", {}) or {}
     tags: list[str] = []
+
+    try:
+        if resolve_agent_type(normalized_config) == "sparsedrive_v1":
+            tags.append("SparseDriveV1")
+    except Exception:
+        pass
 
     craft_cfg = train_cfg.get("CRAFT", {}) or {}
     env_craft_cfg = reward_cfg.get("CRAFT", {}) or {}
@@ -140,12 +175,16 @@ def build_run_tags(*, config: dict[str, Any], algo_tag: str) -> list[str]:
     tags.append("GRPO" if grpo_enabled else "NoGRPO")
 
     scorer_cfg = grpo_cfg.get("scorer", {}) or {}
+    if not scorer_cfg:
+        scorer_cfg = ((normalized_config.get("agent", {}) or {}).get("nuscenes_scorer", {}) or {})
     if not isinstance(scorer_cfg, dict):
         scorer_cfg = {}
     if bool(scorer_cfg.get("ea_gate_enabled", False)) or "ea" in str(algo_tag).lower():
         tags.append("EA")
 
     algo_tag_l = str(algo_tag).lower()
+    if "collision_only" in algo_tag_l or "collisiononly" in algo_tag_l:
+        tags.append("CollisionOnly")
     if "safety" in algo_tag_l or "safety" in str(scorer_cfg).lower():
         tags.append("safety")
     if "dac" in algo_tag_l:
@@ -292,11 +331,12 @@ def build_eval_existing_ckpt_command(
     scenario_dir: Path | None,
     max_scenes: int | None,
     retry_count: int,
+    agent_type: str = "sparsedrive_v2",
 ) -> list[str]:
     cmd = [
         str(python_bin),
         "-u",
-        str(REPO_ROOT / "tools" / "evaluate_existing_sparsedrive_v2_ckpts.py"),
+        str(eval_tool_for_agent_type(agent_type)),
         "--ckpts",
         str(ckpt_path),
         "--hugsim-template",
@@ -358,11 +398,12 @@ def _run_command(*, cmd: list[str], cwd: Path, env: dict[str, str], log_path: Pa
         raise RuntimeError(f"Command failed with code={result.returncode}: {' '.join(cmd)}; see {log_path}")
 
 
-def _promote_checkpoint(*, src_ckpt: Path, algo_tag: str, date_tag: str) -> tuple[Path, int]:
-    SPARSEDRIVE_CKPT_DIR.mkdir(parents=True, exist_ok=True)
-    version = detect_next_version(ckpt_dir=SPARSEDRIVE_CKPT_DIR, algo_tag=algo_tag)
+def _promote_checkpoint(*, src_ckpt: Path, algo_tag: str, date_tag: str, agent_type: str) -> tuple[Path, int]:
+    ckpt_dir = ckpt_dir_for_agent_type(agent_type)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    version = detect_next_version(ckpt_dir=ckpt_dir, algo_tag=algo_tag)
     target_name = build_promoted_ckpt_name(date_tag=date_tag, algo_tag=algo_tag, version=version)
-    target_path = SPARSEDRIVE_CKPT_DIR / target_name
+    target_path = ckpt_dir / target_name
     shutil.copy2(src_ckpt, target_path)
     return target_path, version
 
@@ -389,6 +430,7 @@ def _run_eval_existing_ckpt(
     *,
     algo_tag: str,
     promoted_ckpt: Path,
+    agent_type: str,
     python_bin: Path,
     repeat_evals: int,
     hugsim_template: Path,
@@ -406,6 +448,7 @@ def _run_eval_existing_ckpt(
     cmd = build_eval_existing_ckpt_command(
         python_bin=python_bin,
         ckpt_path=promoted_ckpt,
+        agent_type=agent_type,
         hugsim_template=hugsim_template,
         eval_output_root=eval_output_root,
         run_name=run_name,
@@ -469,6 +512,7 @@ def main() -> int:
     for spec in run_specs:
         source_config = spec.config_path.resolve()
         source_cfg = _load_yaml(source_config)
+        agent_type = resolve_agent_type(source_cfg)
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
         run_id = build_run_id(timestamp=timestamp, config=source_cfg, algo_tag=spec.algo_tag)
         run_dir = args.run_root.resolve() / run_id
@@ -490,6 +534,7 @@ def main() -> int:
             src_ckpt=latest_ckpt,
             algo_tag=run_id,
             date_tag=str(args.date_tag),
+            agent_type=agent_type,
         )
         manifest_path = run_dir / "manifest.json"
         write_run_manifest(
@@ -500,6 +545,7 @@ def main() -> int:
                 "run_id": str(run_id),
                 "run_dir": str(run_dir),
                 "version": int(version),
+                "agent_type": str(agent_type),
                 "source_config_path": str(source_config),
                 "config_path": str(prepared.config_path),
                 "buffer_dir": str(buffer_dir),
@@ -528,6 +574,7 @@ def main() -> int:
         _run_eval_existing_ckpt(
             algo_tag=run_id,
             promoted_ckpt=promoted_ckpt,
+            agent_type=agent_type,
             python_bin=args.train_python.resolve(),
             repeat_evals=int(args.repeat_evals),
             hugsim_template=args.hugsim_template.resolve(),

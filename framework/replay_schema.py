@@ -1,3 +1,20 @@
+"""Canonical replay layout shared by actor, learner, and backend adapters.
+
+Top-level sections:
+
+- ``policy``: backend-owned model inputs plus the selected action identity that
+  learner-side log-prob recomputation needs.
+- ``env``: executed plan/action payload that environment wrappers and scorers
+  may consume.
+- ``grpo``: optional candidate tensors and scorer metadata used by GRPO/AUX
+  training paths.
+- ``aux``: optional environment context such as front-obstacle features.
+
+Generic helpers keep section shapes backend-neutral. Backend-specific
+interpretation belongs in ``framework.agent.<backend>.rl_adapter`` and
+``framework.agent.<backend>.candidate_adapter``.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Mapping, MutableMapping, Sequence

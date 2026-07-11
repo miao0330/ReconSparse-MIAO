@@ -68,7 +68,7 @@ def get_splat(device: str, scene: int, *, use_cache: bool = True):
     if not os.path.exists(ckpt_name):
         raise FileNotFoundError(f"[get_splat] checkpoint not found: {ckpt_name}")
 
-    checkpoint = torch.load(ckpt_name, map_location=device, weights_only=False)
+    checkpoint = torch.load(ckpt_name, map_location="cpu", weights_only=False)
 
     cfg_path = _trainer_config_path()
     if not os.path.exists(cfg_path):
@@ -85,6 +85,8 @@ def get_splat(device: str, scene: int, *, use_cache: bool = True):
             "[get_splat] cannot infer num_timesteps from checkpoint; "
             "expect checkpoint['models']['CamPose']['embeds.weight']"
         ) from e
+    finally:
+        del checkpoint
 
     recon_trainer = import_str(conf.trainer.type)(
         **conf.trainer,
@@ -96,7 +98,11 @@ def get_splat(device: str, scene: int, *, use_cache: bool = True):
     )
 
     num_timesteps = (num_timesteps - 1) // 6 * 6
-    recon_trainer.resume_from_checkpoint(ckpt_path=ckpt_name, load_only_model=True)
+    recon_trainer.resume_from_checkpoint(
+        ckpt_path=ckpt_name,
+        load_only_model=True,
+        map_location=device,
+    )
 
     if bool(use_cache):
         _SPLAT_CACHE[key] = (recon_trainer, int(num_timesteps))

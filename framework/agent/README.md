@@ -23,7 +23,25 @@
 - PPO 和 ReinforcePP 都依赖这里定义的 replay 重算接口，而不是直接依赖某个具体策略的内部实现。
 - optimizer 和 trainable_module 这两个属性也在这里统一暴露，方便算法层和 DDP 包装层直接使用。
 
-### policy_diffusiondrivev2.py
+### Backend Package Pattern
+
+End-to-end driving backends live under per-backend packages:
+
+```text
+adapter.py            model loading, HUGSIM-style observation translation, rollout action conversion, checkpoint/DDP
+rl_adapter.py         replay/logp/value-feature training adapter surface
+candidate_adapter.py  optional GRPO/AUX/scorer/debug adapter surface
+```
+
+Current backend packages:
+
+- `diffusiondrive_v2/`
+- `sparsedrive_v1/`
+- `sparsedrive_v2/`
+
+The public facade classes remain `DiffusionDriveV2Policy`, `SparseDrivePolicy`, and `SparseDriveV2Policy`.
+
+### diffusiondrive_v2/
 
 DiffusionDriveV2 的 RL 适配器。
 
@@ -40,7 +58,7 @@ DiffusionDriveV2 的 RL 适配器。
 - 提供一个极小的可训练模块、checkpoint 读写和 replay-logp 重算能力。
 - 作用是让 learner-only smoke path 能验证入口、batch、Lightning 和 version publish，而不依赖真实大模型权重。
 
-### policy_sparsedrive.py
+### sparsedrive_v1/
 
 SparseDrive 的 RL 适配器。
 
@@ -49,7 +67,7 @@ SparseDrive 的 RL 适配器。
 - PPO 更新时会依赖这里的 replay 重放逻辑，在当前参数下重算选中 mode 的概率。
 - 同时负责 SparseDrive 模型的 checkpoint、DDP 和优化器管理。
 
-### policy_sparsedrive_v2.py
+### sparsedrive_v2/
 
 SparseDriveV2 的 RL 适配器，是当前仓库较新的策略接入层。
 

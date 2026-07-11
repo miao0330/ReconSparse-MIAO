@@ -42,7 +42,7 @@ ReconDreamer-RL 的 actor-learner 训练框架可以从两层理解：运行角�
           -> lightning/actor_learner_datamodule.py
           -> batch/actor_learner.py
           -> lightning/actor_learner_module.py
-          -> algorithms/trajectory_policy_core.py
+          -> algorithms/{returns,ppo,reinforcepp,sac,grpo}.py
           -> io/buffer.py
 ```
 
@@ -130,10 +130,11 @@ python -u script/train_eval_pipeline.py \
   --reinforcepp-config script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl.yaml
 ```
 
-也可以使用 shell wrapper：
+也可以使用两个明确的 shell wrapper：
 
 ```bash
-bash script/run_train_eval_pipeline.sh
+bash script/run_train_eval_pipeline_hugsim_ori.sh
+bash script/run_train_eval_pipeline_recon_train_hugsim_eval.sh
 ```
 
 自动 train + eval 的运行结果通常写到：
@@ -158,7 +159,7 @@ outputs/TrainEvaluationAuto/<run_id>/
 
 策略模型适配层。把 DiffusionDriveV2、SparseDrive、SparseDriveV2 等模型封装成统一 Agent 接口，负责动作采样、replay 保存、log-prob 重算、checkpoint 保存和加载。
 
-关键文件：`base.py`、`policy_diffusiondrivev2.py`、`policy_sparsedrive.py`、`policy_sparsedrive_v2.py`。
+关键文件：`base.py`、`diffusiondrive_v2/`、`sparsedrive_v1/`、`sparsedrive_v2/`。
 
 ### [`env_wrapper/`](env_wrapper/README.md)
 
@@ -188,7 +189,7 @@ Learner 侧 batch 构建层。把 shard 转换成训练 batch，负责 return、
 
 算法目标函数、规格描述与 GRPO scorer 层。提供 PPO、ReinforcePP、SAC-style 的配置对象和 trajectory / GRPO objective，并承载 NuScenes PDM / CRAFT 等 counterfactual scorer，不直接负责启动 Trainer。
 
-关键文件：`ppo.py`、`reinforcepp.py`、`sac.py`、`trajectory_policy_core.py`、`nuscenes_pdm_scorer.py`、`nuscenes_craft_scorer.py`、`nuscenes_scorer_utils.py`。
+关键文件：`returns.py`、`ppo.py`、`reinforcepp.py`、`sac.py`、`grpo.py`、`nuscenes_pdm_scorer.py`、`nuscenes_craft_scorer.py`、`nuscenes_scorer_utils.py`。
 
 ### [`lightning/`](lightning/README.md)
 
@@ -265,7 +266,7 @@ TRAINING_LOCK        # learner 更新 / 权重发布阶段的互斥标记
 - **gsplat / CUDA extension 编译卡住**：可以清理本仓库下的 torch extension cache 后重试，例如 `.cache/torch_extensions/`。
 - **actor 一直等待权重**：检查 `weights/latest.ckpt`、`weights/version.txt` 是否由 learner 正常写出。
 - **learner 等不到 shard**：检查 `buffer/shards/`、actor 日志、scene 配置和环境启动是否成功。
-- **log-prob 或 replay 不一致**：优先查看 `agent/` 的 replay 保存与 `algorithms/trajectory_policy_core.py` 的 log-prob 重算路径。
+- **log-prob 或 replay 不一致**：优先查看 `agent/<backend>/` 的 replay 保存与 `lightning/trajectory_module.py` 的 agent method 调用路径。
 
 ## 📚 Documentation Index
 

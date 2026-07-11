@@ -5,20 +5,14 @@ import os
 import time
 from typing import Any, Dict
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from framework.algorithms.trajectory_policy_core import (
-    agent_logp_from_replay_batch,
-    compute_grpo_objective,
-    compute_ppo_metrics,
-    compute_ppo_objective,
-    compute_reinforce_metrics,
-    compute_reinforce_objective,
-    compute_risk_decel_auxiliary_objective,
-    compute_sac_objective,
-    score_counterfactual_trajectories,
-)
+from framework.algorithms.grpo import compute_grpo_objective, compute_risk_decel_auxiliary_objective
+from framework.algorithms.ppo import compute_ppo_metrics, compute_ppo_objective
+from framework.algorithms.reinforcepp import compute_reinforce_metrics, compute_reinforce_objective
+from framework.algorithms.sac import compute_sac_objective
 from framework.lightning.config import ActorLearnerLightningConfig
 from framework.lightning_compat import L
 from framework.replay_schema import get_front_obstacle_aux, get_policy_model_inputs
@@ -41,6 +35,76 @@ def _use_agent_value_features(agent: Any, value_net: Any, batch: Dict[str, Any])
         return False
     feature_fn = getattr(agent, "value_features_from_replay_batch", None)
     return callable(feature_fn)
+
+
+def _as_logp_tensor(logp_out: Any, *, device: torch.device) -> torch.Tensor:
+    if torch.is_tensor(logp_out):
+        return logp_out.to(device=device, dtype=torch.float32).view(-1)
+    if isinstance(logp_out, (list, tuple)):
+        vals: list[torch.Tensor] = []
+        for item in logp_out:
+            if not torch.is_tensor(item):
+                raise TypeError("logp_from_replay_batch must return tensors or a tensor")
+            vals.append(item.to(device=device, dtype=torch.float32).view(()))
+        if len(vals) == 0:
+            return torch.empty((0,), device=device, dtype=torch.float32)
+        return torch.stack(vals, dim=0)
+    raise TypeError(f"Unsupported logp output type: {type(logp_out)!r}")
+
+
+def _as_score_tensor(scores: Any, *, device: torch.device) -> torch.Tensor:
+    if torch.is_tensor(scores):
+        return scores.to(device=device, dtype=torch.float32)
+    if isinstance(scores, np.ndarray):
+        return torch.from_numpy(scores).to(device=device, dtype=torch.float32)
+    if isinstance(scores, (list, tuple)):
+        return torch.as_tensor(scores, device=device, dtype=torch.float32)
+    raise TypeError(f"Unsupported counterfactual score type: {type(scores)!r}")
+
+
+def agent_logp_from_replay_batch(
+    agent: Any,
+    replays: list[Dict[str, Any]],
+    *,
+    device: torch.device,
+    eta: float = 1.0,
+) -> torch.Tensor:
+    if len(replays) == 0:
+        return torch.empty((0,), device=device, dtype=torch.float32)
+
+    batch_fn = getattr(agent, "logp_from_replay_batch", None)
+    if callable(batch_fn):
+        return _as_logp_tensor(batch_fn(list(replays), eta=float(eta)), device=device)
+
+    replay_fn = getattr(agent, "logp_from_replay", None)
+    if not callable(replay_fn):
+        raise RuntimeError(
+            "Agent must expose `logp_from_replay_batch(...)` or `logp_from_replay(...)` "
+            "for learner-side policy objective computation."
+        )
+    vals = [replay_fn(rep, eta=float(eta)) for rep in replays]
+    return _as_logp_tensor(vals, device=device)
+
+
+def score_counterfactual_trajectories(
+    agent: Any,
+    replays: list[Dict[str, Any]],
+    traj_xyyaw: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    scorer_fn = getattr(agent, "pdm_score_counterfactuals_from_replay_batch", None)
+    if not callable(scorer_fn):
+        scorer_fn = getattr(agent, "score_counterfactuals_from_replay_batch", None)
+    if not callable(scorer_fn):
+        raise RuntimeError(
+            "GRPO is enabled but the agent does not expose a counterfactual scorer hook. "
+            "Expected `pdm_score_counterfactuals_from_replay_batch(...)` or "
+            "`score_counterfactuals_from_replay_batch(...)`."
+        )
+
+    scores = scorer_fn(replays, traj_xyyaw)
+    return _as_score_tensor(scores, device=device)
 
 
 def _maybe_compute_distillation_metrics(

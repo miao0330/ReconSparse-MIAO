@@ -372,16 +372,14 @@ python -u script/train_eval_pipeline.py \
   --reinforcepp-config script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl.yaml
 ```
 
-Wrapper scripts are also available:
-
-```bash
-bash script/run_train_eval_pipeline.sh
-```
-
-For HUGSIM-ORI-oriented evaluation:
+Wrapper scripts are also available for the two supported train/eval paths:
 
 ```bash
 bash script/run_train_eval_pipeline_hugsim_ori.sh
+```
+
+```bash
+bash script/run_train_eval_pipeline_recon_train_hugsim_eval.sh
 ```
 
 The default pipeline runs ReinforcePP only. To evaluate PPO as well, add `--ppo` and provide `--ppo-config`.

@@ -1,0 +1,41 @@
+env:
+  reward:
+    mode: step_path
+    step_path:
+      CRAFT:
+        enable: false
+      path:
+        interp_ds_m: 0.25
+        w_progress: 100.0
+        progress_forward_cap_m: 2.0
+        progress_backward_cap_m: 0.5
+        w_lateral: 0.0
+        lateral_free_m: 0.3
+        lateral_huber_delta_m: 0.5
+        w_yaw: 0.0
+        yaw_free_deg: 5.0
+        yaw_huber_delta_deg: 10.0
+        severe_gate_scale: 0.0
+      comfort:
+        w_longitudinal_jerk: 0.0
+        longitudinal_jerk_free: 1.5
+        longitudinal_jerk_delta: 2.0
+        w_yaw_jerk: 0.0
+        yaw_jerk_free: 0.2
+        yaw_jerk_delta: 0.3
+        jerk_clip: 50.0
+      collision:
+        mode: dense_penalty
+        w_static: 50.0
+        w_dynamic: 50.0
+        gate_scale: 0.0
+      safety:
+        enable: false
+        lookahead_m: 15.0
+        corridor_half_width_m: 2.5
+        safe_gap_m: 8.0
+        safe_ttc_s: 3.0
+        w_clearance: 1.0
+        w_ttc: 1.0
+        progress_gate_strength: 1.0
+        min_progress_gate: 0.3

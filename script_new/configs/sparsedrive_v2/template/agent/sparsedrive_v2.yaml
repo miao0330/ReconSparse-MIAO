@@ -1,0 +1,7 @@
+agent:
+  type: sparsedrive_v2
+  ckpt: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/egoADs/SparseDriveV2/ckpt/sparsedrive_navsimv2.ckpt
+  trainable_prefixes:
+    - _trajectory_head.decoder.layers.1.metric_heads
+  frozen_prefixes:
+    - _backbone

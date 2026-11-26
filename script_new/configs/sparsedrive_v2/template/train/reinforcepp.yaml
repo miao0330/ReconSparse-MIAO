@@ -1,0 +1,11 @@
+train:
+  algo: reinforcepp
+  closed_loop:
+    reinforcepp:
+      norm_eps: 1.0e-8
+      kl_coef: 0.03
+      epochs: 1
+      policy_grad_weight: 1.0
+      forward_kl_coef: 0.00
+      reverse_kl_coef: 0.00
+      distill_temperature: 1.0

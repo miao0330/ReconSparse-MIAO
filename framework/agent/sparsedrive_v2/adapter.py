@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
+from PIL import Image
 
 from ..base import Agent
 from framework.replay_schema import (
@@ -156,6 +157,7 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         device: str | None = None,
         rl_lr: float = 1e-5,
         execute_mode: str = "first_step",
+        image_preprocess: str = "legacy_hf",
         trainable_prefixes: Sequence[str] | None = None,
         frozen_prefixes: Sequence[str] | None = None,
         nuscenes_scorer_config: Dict[str, Any] | None = None,
@@ -170,19 +172,26 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
 
         if str(execute_mode).strip().lower() not in {"first_step", "continuous", "step1"}:
             raise ValueError(f"Unsupported execute_mode for SparseDriveV2: {execute_mode}")
+        normalized_image_preprocess = str(image_preprocess).strip().lower()
+        if normalized_image_preprocess not in {"native", "legacy_hf"}:
+            raise ValueError(
+                "Unsupported SparseDriveV2 image preprocessing: "
+                f"{image_preprocess!r}; expected 'native' or 'legacy_hf'"
+            )
 
         self._SparseDriveConfig = SparseDriveConfig
         self._SparseDriveModel = SparseDriveModel
         self.ckpt_path = str(ckpt_path)
         self._device_override = device
         self._execute_mode = "first_step"
+        self._image_preprocess = normalized_image_preprocess
         self._trainable_prefixes = _normalize_trainable_prefixes(trainable_prefixes)
         self._frozen_prefixes = _normalize_trainable_prefixes(frozen_prefixes)
         self._nuscenes_scorer_config = dict(nuscenes_scorer_config or {})
         self._grpo_num_candidates = max(0, int(grpo_num_candidates or 0))
 
         self._cfg = self._SparseDriveConfig()
-        self._cfg.bkb_path = os.path.join(_SPARSEDRIVE_V2_ROOT, "ckpt", "resnet34.bin")
+        self._cfg.bkb_path = os.path.join(_SPARSEDRIVE_V2_ROOT, "ckpt", "resnet34.bin/pytorch_model.bin")
         self._cfg.path_anchor = os.path.join(_SPARSEDRIVE_V2_ROOT, "ckpt", "kmeans", "path_1024.npy")
         self._cfg.velocity_anchor = os.path.join(_SPARSEDRIVE_V2_ROOT, "ckpt", "kmeans", "velocity_256.npy")
         self._cfg.trajectory_anchor = os.path.join(_SPARSEDRIVE_V2_ROOT, "ckpt", "kmeans", "trajectory_1024_256.npz")
@@ -395,6 +404,7 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         cam_distortions: np.ndarray,
         selected_idx: List[int],
         out_hw: Tuple[int, int],
+        image_transforms: Sequence[np.ndarray] | None = None,
     ) -> Dict[str, np.ndarray]:
         out_h, out_w = int(out_hw[0]), int(out_hw[1])
         n = len(selected_idx)
@@ -415,13 +425,25 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
             else:
                 h0, w0 = float(out_h), float(out_w)
 
-            sx = float(out_w) / max(1.0, w0)
-            sy = float(out_h) / max(1.0, h0)
             scaled = intrinsics.copy()
-            scaled[0, 0] *= sx
-            scaled[0, 2] *= sx
-            scaled[1, 1] *= sy
-            scaled[1, 2] *= sy
+            if image_transforms is not None:
+                # The legacy HF path first scaled the raw camera calibration
+                # to (config.W, config.H), then applied the same affine
+                # resize/crop matrix used for the image.
+                config_h = int(self._cfg.H)
+                config_w = int(self._cfg.W)
+                scaled[0, 0] *= float(config_w) / max(1.0, w0)
+                scaled[0, 2] *= float(config_w) / max(1.0, w0)
+                scaled[1, 1] *= float(config_h) / max(1.0, h0)
+                scaled[1, 2] *= float(config_h) / max(1.0, h0)
+                scaled = np.asarray(image_transforms[camera_id][:3, :3], dtype=np.float32) @ scaled
+            else:
+                sx = float(out_w) / max(1.0, w0)
+                sy = float(out_h) / max(1.0, h0)
+                scaled[0, 0] *= sx
+                scaled[0, 2] *= sx
+                scaled[1, 1] *= sy
+                scaled[1, 2] *= sy
 
             cam_to_ego = np.asarray(cam2ego[camera_id], dtype=np.float32)
             ego_to_cam = np.linalg.inv(cam_to_ego)
@@ -443,6 +465,34 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
             "projection_mat": lidar2img.copy(),
             "image_wh": image_wh,
         }
+
+    def _legacy_hf_image_transform(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Apply the old HF bridge's SparseDrive test-time image transform."""
+        cfg_h = int(self._cfg.H)
+        cfg_w = int(self._cfg.W)
+        final_h = int(self._cfg.final_dim[0])
+        final_w = int(self._cfg.final_dim[1])
+
+        pil_image = Image.fromarray(np.asarray(image, dtype=np.uint8))
+        pil_image = pil_image.resize((cfg_w, cfg_h), Image.Resampling.BILINEAR)
+
+        resize = max(float(final_h) / float(cfg_h), float(final_w) / float(cfg_w))
+        resize_dims = (int(cfg_w * resize), int(cfg_h * resize))
+        new_w, new_h = resize_dims
+        bot_pct_lim = getattr(self._cfg, "bot_pct_lim", (0.0, 0.0))
+        crop_h = int((1.0 - float(np.mean(bot_pct_lim))) * new_h) - final_h
+        crop_w = int(max(0, new_w - final_w) / 2)
+        crop = (crop_w, crop_h, crop_w + final_w, crop_h + final_h)
+
+        transformed = pil_image.resize(resize_dims).crop(crop)
+        image_out = np.asarray(transformed, dtype=np.float32)
+        if bool(getattr(self._cfg, "to_bgr", False)):
+            image_out = cv2.cvtColor(image_out, cv2.COLOR_RGB2BGR)
+
+        transform = np.eye(4, dtype=np.float32)
+        transform[:2, :2] *= float(resize)
+        transform[:2, 2] -= np.asarray(crop[:2], dtype=np.float32)
+        return image_out, transform
 
     def _build_status_feature(self, observation: Dict[str, Any]) -> torch.Tensor:
         if "ego_status" in observation:
@@ -469,8 +519,16 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         status = np.concatenate([command4, velocity2, acceleration2], axis=0)
         return torch.from_numpy(status[None, :]).to(dtype=torch.float32)
 
-    def _build_features(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_features(
+        self,
+        observation: Dict[str, Any],
+        *,
+        image_preprocess: str = "native",
+    ) -> Dict[str, Any]:
         missing_fields: List[str] = []
+        image_preprocess = str(image_preprocess).strip().lower()
+        if image_preprocess not in {"native", "legacy_hf"}:
+            raise ValueError(f"Unsupported SparseDriveV2 image preprocessing: {image_preprocess!r}")
 
         cfg_cams = [str(cam) for cam in list(self._cfg.cams)]
         cam_keys = [self._camera_obs_key_for_cfg_cam(cam) for cam in cfg_cams]
@@ -483,7 +541,18 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
             imgs.append(np.asarray(observation[key]))
 
         out_h, out_w = int(self._cfg.final_dim[0]), int(self._cfg.final_dim[1])
-        imgs_rs = [cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_LINEAR) for img in imgs]
+        image_transforms: Sequence[np.ndarray] | None = None
+        if image_preprocess == "legacy_hf":
+            transformed_images = []
+            transform_by_camera: List[np.ndarray] = [np.eye(4, dtype=np.float32) for _ in range(6)]
+            for image, camera_id in zip(imgs, cam_idx):
+                transformed, transform = self._legacy_hf_image_transform(image)
+                transformed_images.append(transformed)
+                transform_by_camera[int(camera_id)] = transform
+            imgs_rs = transformed_images
+            image_transforms = transform_by_camera
+        else:
+            imgs_rs = [cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_LINEAR) for img in imgs]
         mean = np.asarray(self._cfg.img_mean, dtype=np.float32)
         std = np.asarray(self._cfg.img_std, dtype=np.float32)
         imgs_norm = [self._normalize_rgb(img, mean, std) for img in imgs_rs]
@@ -529,6 +598,7 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
             cam_distortions=cam_dist_np,
             selected_idx=cam_idx,
             out_hw=(out_h, out_w),
+            image_transforms=image_transforms,
         )
 
         camera_feature: Dict[str, torch.Tensor] = {"imgs": img_tensor}
@@ -559,7 +629,10 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         self,
         observations: Sequence[Dict[str, Any]],
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        features_list = [self._build_features(obs) for obs in observations]
+        features_list = [
+            self._build_features(obs, image_preprocess=self._image_preprocess)
+            for obs in observations
+        ]
         if len(features_list) == 0:
             return [], {"camera_feature": {}, "status_feature": torch.empty((0,), dtype=torch.float32)}
 
@@ -1296,6 +1369,47 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
             mode_idx=mode_idx,
             mode_select=mode_select,
         )
+
+    def predict_trajectory(
+        self,
+        observation: Dict[str, Any],
+        *,
+        mode_idx: int = -1,
+        mode_select: str = "greedy",
+        image_preprocess: str | None = None,
+    ) -> np.ndarray:
+        """Return a complete deterministic evaluation trajectory.
+
+        This is intentionally separate from :meth:`act`: RL rollout code
+        relies on ``act`` returning the first-point environment action,
+        log-probability, and replay payload. HUGSIM evaluation instead needs
+        the selected trajectory for its controller and must not create replay
+        state or sample a stochastic mode by default.
+        """
+        preprocess = self._image_preprocess if image_preprocess is None else str(image_preprocess)
+        features = self._build_features(observation, image_preprocess=preprocess)
+        features_dev = self._to_device_features(features, self.device)
+
+        model = self._unwrap_model(self._model)
+        model.eval()
+        with torch.inference_mode():
+            out = self._forward_policy(features_dev)
+
+        score_logits = out["candidate_scores"].to(dtype=torch.float32)
+        if score_logits.ndim == 1:
+            score_logits = score_logits.unsqueeze(0)
+        selected_mode = self._select_mode(
+            score_logits[0],
+            mode_idx=int(mode_idx),
+            mode_select=str(mode_select),
+        )
+        trajectories = out["candidate_trajectories"]
+        if trajectories.ndim != 4 or trajectories.shape[0] < 1:
+            raise RuntimeError(
+                "SparseDriveV2 evaluation requires candidate_trajectories with "
+                f"shape (batch, candidates, horizon, dims), got {tuple(trajectories.shape)}"
+            )
+        return self._traj_to_xyyaw(trajectories[0, selected_mode])
 
     def act_batch(
         self,

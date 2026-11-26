@@ -60,6 +60,7 @@ def build_actor_env(
     actor_id: int,
     worker_id: Optional[int] = None,
     total_actors: int = 1,
+    reward_cfg_override: Optional[Dict[str, Any]] = None,
 ) -> Any:
     from framework.env_wrapper import make_scene_sampling_env
 
@@ -183,7 +184,11 @@ def build_actor_env(
 
     return make_scene_sampling_env(
         cuda=int(cuda),
-        reward_cfg=env_cfg.get("reward", {}) or {},
+        reward_cfg=(
+            reward_cfg_override
+            if reward_cfg_override is not None
+            else (env_cfg.get("reward", {}) or {})
+        ),
         debug=bool(env_cfg.get("debug", False)),
         scene_ids=list(scene_ids),
         scene_sampling=str(scene_sampling),

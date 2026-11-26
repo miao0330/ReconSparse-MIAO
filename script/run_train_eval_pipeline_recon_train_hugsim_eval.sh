@@ -11,9 +11,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-HUGSIM_ROOT="${HUGSIM_ROOT:-/root/clone/HUGSIM-ORI}"
+HUGSIM_ROOT="${HUGSIM_ROOT:-/htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI}"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-DEFAULT_REINFORCEPP_CONFIG="$REPO_ROOT/script/configs/sparsedrive_v2/20260704_template_RECON_algo-dsl.yaml"
+DEFAULT_REINFORCEPP_CONFIG="$REPO_ROOT/script/configs/sparsedrive_v2/20260820_RECON_ReinforcePP_StaticGRPO_Aux.yaml"
 DEFAULT_HUGSIM_TEMPLATE="$HUGSIM_ROOT/configs/sim/nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml"
 DEFAULT_SCENARIO_DIR="$HUGSIM_ROOT/configs/scenarios/nuscenes"
 
@@ -58,7 +59,7 @@ if [[ "$HAS_EXPLICIT_REINFORCEPP_CONFIG" == "0" ]]; then
   EXTRA_ARGS+=(--reinforcepp-config "$DEFAULT_REINFORCEPP_CONFIG")
 fi
 if [[ "$HAS_EXPLICIT_REINFORCEPP_ALGO_TAG" == "0" ]]; then
-  EXTRA_ARGS+=(--reinforcepp-algo-tag recon_train_reinforcepp_nogrpo_noaux)
+  EXTRA_ARGS+=(--reinforcepp-algo-tag recon_train_reinforcepp_staticgrpo_aux)
 fi
 if [[ "$HAS_EXPLICIT_HUGSIM_TEMPLATE" == "0" ]]; then
   EXTRA_ARGS+=(--hugsim-template "$DEFAULT_HUGSIM_TEMPLATE")
@@ -75,6 +76,5 @@ fi
 if [[ "$HAS_EXPLICIT_REPEAT_EVALS" == "0" ]]; then
   EXTRA_ARGS+=(--repeat-evals 2)
 fi
-
-exec /root/miniconda3/envs/recondreamerNew-rl/bin/python -u \
+exec /htfs/filesystem_pfs/waytous/lixm/miniconda3/envs/reconsparse/bin/python -u \
   "$REPO_ROOT/script/train_eval_pipeline.py" "$@" "${EXTRA_ARGS[@]}"

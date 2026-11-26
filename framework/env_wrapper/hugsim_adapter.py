@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import json
 import math
 import os
 import subprocess
 from pathlib import Path
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -47,9 +50,32 @@ ALL_CAMERA_INDEX = {
     "back": 4,
     "back_right": 5,
 }
-
+HUGSIM_LIDAR_TO_NAVSIM_LIDAR = np.asarray(
+    [
+        [0.0, 1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
 RECON_DATA_ROOT_DEFAULT = Path(__file__).resolve().parents[2] / "assets" / "nus" / "data"
 FIFO_RUNNER_DEFAULT = Path(__file__).resolve().parent / "hugsim_fifo_runner.py"
+
+
+@lru_cache(maxsize=1)
+def _hugsim_geometry():
+    sibling = Path(__file__).resolve().parents[3] / "HUGSIM-ORI"
+    root = Path(os.environ["HUGSIM_ROOT"]) if "HUGSIM_ROOT" in os.environ else sibling
+    if "HUGSIM_ROOT" not in os.environ and not root.is_dir():
+        root = Path(resolve_hugsim_root())
+    path = root / "sim" / "utils" / "camera_geometry.py"
+    spec = importlib.util.spec_from_file_location("hugsim_camera_geometry", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load HUGSIM camera geometry from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _fov2focal(fov: float, pixels: int) -> float:
@@ -82,9 +108,12 @@ def _ego_status(hugsim_info: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np
     steer = float(hugsim_info.get("ego_steer", 0.0))
     speed = float(hugsim_info.get("ego_velo", 0.0))
     acc = float(hugsim_info.get("accelerate", 0.0))
-    yaw = -steer
-    velocity = np.asarray([speed * math.cos(yaw), speed * math.sin(yaw)], dtype=np.float32)
-    acceleration = np.asarray([acc * math.cos(yaw), acc * math.sin(yaw)], dtype=np.float32)
+    wheelbase = float(hugsim_info.get("wheelbase", 0.0))
+    yaw_rate = 0.0 if wheelbase <= 0.0 else speed * math.tan(steer) / wheelbase
+    # EgoStatus is expressed in the current ego frame (forward, left).  The
+    # steering angle is a front-wheel angle, not a vehicle yaw angle.
+    velocity = np.asarray([speed, 0.0], dtype=np.float32)
+    acceleration = np.asarray([acc, speed * yaw_rate], dtype=np.float32)
     command = _command4(hugsim_info)
     return command, velocity, acceleration
 
@@ -156,6 +185,27 @@ class HUGSIMRewardProxy:
         self._status_vel_xy = velocity.astype(np.float64, copy=False)
         self._status_acc_xy = acceleration.astype(np.float64, copy=False)
 
+    def capture_state(self) -> dict[str, Any]:
+        return {
+            "scene": int(self.scene),
+            "now_frame": int(self.now_frame),
+            "start_ego": np.asarray(self.start_ego, dtype=np.float64).copy(),
+            "status_vel_xy": np.asarray(self._status_vel_xy, dtype=np.float64).copy(),
+            "status_acc_xy": np.asarray(self._status_acc_xy, dtype=np.float64).copy(),
+            "status_cmd": np.asarray(self._status_cmd, dtype=np.float64).copy(),
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            raise TypeError("HUGSIM reward proxy state must be a mapping")
+        self.scene = int(state["scene"])
+        self.now_frame = int(state["now_frame"])
+        self.start_ego = np.asarray(state["start_ego"], dtype=np.float64).reshape(4, 4).copy()
+        self._status_vel_xy = np.asarray(state["status_vel_xy"], dtype=np.float64).reshape(2).copy()
+        self._status_acc_xy = np.asarray(state["status_acc_xy"], dtype=np.float64).reshape(2).copy()
+        self._status_cmd = np.asarray(state["status_cmd"], dtype=np.float64).reshape(4).copy()
+        self._ensure_expert_loaded(self.scene)
+
     def _ensure_expert_loaded(self, recon_scene_id: int) -> None:
         if self._expert_scene == int(recon_scene_id) and len(self.all_expert_ego) > 0:
             return
@@ -198,6 +248,7 @@ def build_hugsim_training_obs(
     hugsim_info: dict[str, Any],
     mapping: HUGSIMFrameMapping,
     hugsim_step_idx: int,
+    camera_geometry: str = "rendered",
 ) -> dict[str, Any]:
     """Build the training observation used by HUGSIM-first rollouts.
 
@@ -207,6 +258,8 @@ def build_hugsim_training_obs(
     out: dict[str, Any] = {}
     rgb = hugsim_obs.get("rgb", {})
     cam_params = hugsim_info.get("cam_params", {})
+    geometry = str(camera_geometry).strip().lower()
+    ground_poses = hugsim_info.get("camera_to_ground_flu", {})
 
     cam2ego = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], 6, axis=0)
     cam_intr = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], 6, axis=0)
@@ -219,7 +272,25 @@ def build_hugsim_training_obs(
         image = np.asarray(rgb[hugsim_cam], dtype=np.uint8)
         out[obs_key] = image
         params = cam_params.get(hugsim_cam, {})
-        if "v2c" in params:
+        if geometry == "rendered":
+            pose = np.asarray(ground_poses.get(hugsim_cam), dtype=np.float32)
+            if pose.shape != (4, 4) or not np.isfinite(pose).all():
+                raise ValueError(
+                    f"Missing or invalid HUGSIM camera_to_ground_flu for {hugsim_cam}. "
+                    "Use observations from the updated HUGSIM simulator."
+                )
+            intrinsic = params.get("intrinsic")
+            if intrinsic is None or image.shape[:2] != (intrinsic["H"], intrinsic["W"]):
+                raise ValueError(f"HUGSIM RGB size or intrinsics are invalid for {hugsim_cam}")
+            cam2ego[cam_idx] = np.asarray(hugsim_info.get("ground_to_model_flu", np.eye(4))) @ pose
+        elif geometry in {"navsim_lidar", "legacy_hf"} and "l2c" in params:
+            hugsim_lidar_to_camera = np.asarray(params["l2c"], dtype=np.float32)
+            navsim_lidar_to_camera = hugsim_lidar_to_camera @ np.linalg.inv(HUGSIM_LIDAR_TO_NAVSIM_LIDAR)
+            try:
+                cam2ego[cam_idx] = np.linalg.inv(navsim_lidar_to_camera)
+            except Exception:
+                cam2ego[cam_idx] = np.eye(4, dtype=np.float32)
+        elif "v2c" in params:
             try:
                 cam2ego[cam_idx] = np.linalg.inv(np.asarray(params["v2c"], dtype=np.float32))
             except Exception:
@@ -237,6 +308,9 @@ def build_hugsim_training_obs(
             cam_hw[cam_idx] = np.asarray([float(image.shape[0]), float(image.shape[1])], dtype=np.float32)
 
     command, velocity, acceleration = _ego_status(hugsim_info)
+    if geometry == "rendered" and "model_ego_velocity" in hugsim_info:
+        velocity = np.asarray(hugsim_info["model_ego_velocity"], dtype=np.float32)
+        acceleration = np.asarray(hugsim_info["model_ego_acceleration"], dtype=np.float32)
     ego_status = np.concatenate([command, velocity, acceleration], axis=0).astype(np.float32)
     out["driving_command"] = command
     out["ego_velocity"] = velocity
@@ -643,6 +717,45 @@ class HUGSIMFifoClient:
         self._episode_done = False
         return dict(obs), dict(info)
 
+    def capture_branch_state(self) -> dict[str, Any]:
+        if self.process is None or self.process.poll() is not None:
+            raise RuntimeError("HUGSIM FIFO client must be running before capturing branch state")
+        from framework.env_wrapper.fifo_io import write_fifo_payload
+
+        write_fifo_payload(
+            self.plan_pipe,
+            {"op": "capture_branch_state"},
+            process=self.process,
+            timeout_s=self.fifo_timeout_s,
+            poll_interval_s=self.fifo_poll_interval_s,
+        )
+        response = self._read_payload()
+        if not isinstance(response, dict) or response.get("op", None) != "capture_branch_state":
+            raise RuntimeError(f"Expected HUGSIM branch snapshot response, got {type(response).__name__}")
+        snapshot = response.get("snapshot", None)
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("HUGSIM branch snapshot response is missing snapshot mapping")
+        return snapshot
+
+    def restore_branch_state(self, snapshot: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(snapshot, dict):
+            raise TypeError("HUGSIM branch snapshot must be a mapping")
+        if self.process is None or self.process.poll() is not None:
+            self.start()
+            self._read_obs_info()  # Drain the runner's initial reset observation.
+        from framework.env_wrapper.fifo_io import write_fifo_payload
+
+        write_fifo_payload(
+            self.plan_pipe,
+            {"op": "restore_branch_state", "snapshot": snapshot},
+            process=self.process,
+            timeout_s=self.fifo_timeout_s,
+            poll_interval_s=self.fifo_poll_interval_s,
+        )
+        obs, info = self._read_obs_info()
+        self._episode_done = bool(info.get("terminated", False) or info.get("truncated", False))
+        return dict(obs), dict(info)
+
     def step(self, plan_traj: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         if self.process is None:
             raise RuntimeError("HUGSIM FIFO client step called before start")
@@ -698,20 +811,23 @@ class HUGSIMFifoClient:
         self._episode_done = False
 
     def _read_obs_info(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        payload = self._read_payload()
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            raise RuntimeError(f"Expected FIFO payload (obs, info), got {type(payload).__name__}")
+        obs, info = payload
+        return dict(obs), dict(info)
+
+    def _read_payload(self) -> Any:
         if self.process is None:
             raise RuntimeError("HUGSIM FIFO client is not started")
         from framework.env_wrapper.fifo_io import read_fifo_payload
 
-        payload = read_fifo_payload(
+        return read_fifo_payload(
             self.obs_pipe,
             process=self.process,
             timeout_s=self.fifo_timeout_s,
             poll_interval_s=self.fifo_poll_interval_s,
         )
-        if not isinstance(payload, tuple) or len(payload) != 2:
-            raise RuntimeError(f"Expected FIFO payload (obs, info), got {type(payload).__name__}")
-        obs, info = payload
-        return dict(obs), dict(info)
 
 
 class HUGSIMReconEnv:
@@ -1085,19 +1201,87 @@ class HUGSIMReconEnv:
         )
         return obs, reset_info
 
+    def capture_branch_state(self) -> dict[str, Any]:
+        capture = getattr(self.env, "capture_branch_state", None)
+        if not callable(capture):
+            raise RuntimeError("HUGSIM backend does not support exact branch snapshots")
+        if self._last_hugsim_obs is None or self._last_hugsim_info is None:
+            raise RuntimeError("HUGSIM branch state cannot be captured before reset")
+        return {
+            "version": 1,
+            "backend_state": capture(),
+            "hugsim_step_idx": int(self._hugsim_step_idx),
+            "reward_state": self._reward_computer.capture_state(),
+            "reward_proxy_state": self._reward_proxy.capture_state(),
+            "external_plan_local_xyyaw": copy.deepcopy(self._external_plan_local_xyyaw),
+        }
+
+    def restore_branch_state(self, snapshot: dict[str, Any]):
+        if not isinstance(snapshot, dict) or int(snapshot.get("version", -1)) != 1:
+            raise ValueError("Unsupported HUGSIMReconEnv branch snapshot")
+        restore = getattr(self.env, "restore_branch_state", None)
+        if not callable(restore):
+            raise RuntimeError("HUGSIM backend does not support exact branch restore")
+        hugsim_obs, hugsim_info = restore(dict(snapshot["backend_state"]))
+        self._hugsim_step_idx = int(snapshot["hugsim_step_idx"])
+        self._last_hugsim_obs = dict(hugsim_obs)
+        self._last_hugsim_info = dict(hugsim_info)
+        self._external_plan_local_xyyaw = copy.deepcopy(snapshot.get("external_plan_local_xyyaw", None))
+        self._reward_computer.restore_state(dict(snapshot["reward_state"]))
+        self._reward_proxy.restore_state(dict(snapshot["reward_proxy_state"]))
+
+        mapping = self.scene_index.map_time(
+            self.official_scene_name,
+            float(hugsim_info.get("timestamp", 0.0)),
+        )
+        obs = build_hugsim_training_obs(
+            hugsim_obs=dict(hugsim_obs),
+            hugsim_info=dict(hugsim_info),
+            mapping=mapping,
+            hugsim_step_idx=self._hugsim_step_idx,
+        )
+        info: dict[str, Any] = {
+            "scene": int(mapping.recon_scene_id),
+            "scene_id": int(mapping.recon_scene_id),
+            "now_frame": int(mapping.frame_idx),
+            "frame_idx": int(mapping.frame_idx),
+            "sample_token": str(mapping.sample_token),
+            "hugsim_timestamp": float(mapping.hugsim_relative_time_s),
+            "official_scene_name": str(mapping.official_scene_name),
+        }
+        alignment = self._get_alignment(mapping)
+        alignment = self._alignment_for_step(
+            alignment=alignment,
+            mapping=mapping,
+            hugsim_info=dict(hugsim_info),
+        )
+        info = self._augment_aligned_context(
+            info=info,
+            hugsim_info=dict(hugsim_info),
+            mapping=mapping,
+            alignment=alignment,
+        )
+        return obs, info
+
     def _plan_from_action(self, action: Any) -> np.ndarray:
         if isinstance(self._external_plan_local_xyyaw, np.ndarray) and self._external_plan_local_xyyaw.ndim == 2:
-            plan = np.asarray(self._external_plan_local_xyyaw[:, :2], dtype=np.float32)
+            plan = np.asarray(self._external_plan_local_xyyaw, dtype=np.float32)
+            transform = (self._last_hugsim_info or {}).get("ground_to_model_flu")
+            if transform is not None:
+                plan = _hugsim_geometry().vehicle_trajectory_to_ground(plan, transform)
             hugsim_plan = _canonical_local_xy_to_hugsim_fifo_plan(
-                plan,
+                plan[:, :2],
                 lateral_convention=getattr(self, "_fifo_plan_lateral_convention", "right_forward"),
             )
             self._external_plan_local_xyyaw = None
             return hugsim_plan
         if isinstance(action, (tuple, list)) and len(action) >= 3:
-            first = np.asarray([[float(action[0]), float(action[1])]], dtype=np.float32)
+            first = np.asarray([[float(action[0]), float(action[1]), float(action[2])]], dtype=np.float32)
+            transform = (self._last_hugsim_info or {}).get("ground_to_model_flu")
+            if transform is not None:
+                first = _hugsim_geometry().vehicle_trajectory_to_ground(first, transform)
             return _canonical_local_xy_to_hugsim_fifo_plan(
-                first,
+                first[:, :2],
                 lateral_convention=getattr(self, "_fifo_plan_lateral_convention", "right_forward"),
             )
         raise ValueError(f"Unsupported HUGSIM action format: {action!r}")

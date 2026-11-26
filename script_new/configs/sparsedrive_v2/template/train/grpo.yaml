@@ -1,0 +1,17 @@
+train:
+  grpo:
+    enable: true
+    coef: 0.1
+    num_candidates: 16
+    candidate_select: topk
+    objective: grpo
+    temperature: 1.0
+    norm_eps: 1.0e-6
+    use_rank_adv: false
+    score_clip: null
+    scorer:
+      backend: craft_carl
+      scene_cache_root: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/assets/nus/cache
+      center_dev_max_m: 2.0
+      heading_dev_max_deg: 90.0
+      off_global_route_threshold_m: 3.0

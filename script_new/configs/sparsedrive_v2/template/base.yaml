@@ -1,0 +1,40 @@
+# Shared defaults. Compose this file with env/, train/, and agent/ fragments.
+env:
+  debug: false
+  render_w: 800
+  render_h: 450
+
+train:
+  wandb:
+    enabled: false
+    project: reconSparse
+  eta: 1.0
+  mode_idx: -1
+  policy_mode_select: sample
+  policy_execute_mode: first_step
+  policy_lr: 1.0e-4
+  weight_decay: 0.0
+  max_grad_norm: 0.5
+  minibatch_size: 32
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  actor_learner:
+    mode: async
+    timestamp_buffer_dir: true
+    learner_gpu_id: 0
+    actor_gpu_pool: [1]
+    actors_per_gpu: 1
+    max_inflight_per_actor: 1
+    pause_actor_on_learner_gpu: true
+    scene_shard_by_actor: true
+    scene_shard_strategy: round_robin
+    actor_horizon: 32
+    num_envs_per_actor: 1
+    vec_env_mode: serial
+    max_shard_version_lag: 2
+    variable_shard_on_done: true
+    samples_per_update: 0
+    shards_per_update: 1
+    poll_interval_s: 0.2
+    max_updates: 1

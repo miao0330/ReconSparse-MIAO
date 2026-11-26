@@ -1,0 +1,30 @@
+extends:
+  - ../template/base.yaml
+  - ../template/env/base.yaml
+  - ../template/env/rewards/step_path.yaml
+  - ../template/env/rewards/policy_loop_dense.yaml
+  - ../template/train/actor_learner.yaml
+  - ../template/train/reinforcepp.yaml
+  - ../template/train/policy_loop_grpo.yaml
+  - ../template/agent/sparsedrive_v2.yaml
+
+env:
+  use_all_scenes: false
+  hugsim:
+    scenes:
+      - scene-0411-medium-00.yaml
+    output_root: /OpenDataset/ReconDreamer-RL/outputs/experiments/policy_loop_stage1_scene0411_collision500_u32/hugsim/baseline
+  reward:
+    step_path:
+      collision:
+        w_static: 500.0
+        w_dynamic: 500.0
+
+train:
+  wandb:
+    group: HUGSIM_scene0411_PolicyLoop_DenseReward
+  actor_learner:
+    buffer_dir: /root/clone/ReconDreamer-RL/outputs/actor_learner/HUGSIM_scene0411_PolicyLoop_DenseReward
+
+agent:
+  ckpt: /OpenDataset/ReconDreamer-RL/outputs/actor_learner/20260701_035459_HUGSIM_Template_ReinforcePP_NoGRPO_NoAux_Substeps1/weights/latest.ckpt

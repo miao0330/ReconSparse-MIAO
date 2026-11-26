@@ -8,6 +8,8 @@ Top-level sections:
   may consume.
 - ``grpo``: optional candidate tensors and scorer metadata used by GRPO/AUX
   training paths.
+- ``policy_loop_grpo``: optional long-horizon counterfactual returns attached
+  only to replay entries selected as policy-in-the-loop keyframes.
 - ``aux``: optional environment context such as front-obstacle features.
 
 Generic helpers keep section shapes backend-neutral. Backend-specific
@@ -175,6 +177,65 @@ def require_grpo_candidate_field(replay: Mapping[str, Any], key: str, *, index: 
     if key not in candidates:
         raise RuntimeError(f"GRPO replay missing candidates[{key!r}] at index {int(index)}")
     return candidates[key]
+
+
+def ensure_policy_loop_grpo(replay: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    return ensure_section(replay, "policy_loop_grpo")
+
+
+def get_policy_loop_grpo(replay: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    section = replay.get("policy_loop_grpo", None)
+    if section is None:
+        return None
+    if not isinstance(section, Mapping):
+        raise RuntimeError("replay['policy_loop_grpo'] must be a mapping")
+    return section
+
+
+def set_policy_loop_grpo_result(
+    replay: MutableMapping[str, Any],
+    *,
+    episode_id: str,
+    keyframe_time_s: float,
+    keyframe_step: int,
+    weights_version: int,
+    mode_indices: Any,
+    candidate_returns: Any,
+    actual_steps: Any,
+    terminated: Any,
+    termination_time_s: Any,
+    termination_reason: Any,
+    valid_mask: Any,
+    prefix_state_hash: str,
+    restored_state_signatures: Any | None = None,
+) -> None:
+    section = ensure_policy_loop_grpo(replay)
+    section.update(
+        {
+            "episode_id": str(episode_id),
+            "keyframe_time_s": float(keyframe_time_s),
+            "keyframe_step": int(keyframe_step),
+            "weights_version": int(weights_version),
+            "mode_indices": mode_indices,
+            "candidate_returns": candidate_returns,
+            "actual_steps": actual_steps,
+            "terminated": terminated,
+            "termination_time_s": termination_time_s,
+            "termination_reason": termination_reason,
+            "valid_mask": valid_mask,
+            "prefix_state_hash": str(prefix_state_hash),
+            "restored_state_signatures": restored_state_signatures,
+        }
+    )
+
+
+def require_policy_loop_grpo_field(replay: Mapping[str, Any], key: str, *, index: int) -> Any:
+    section = get_policy_loop_grpo(replay)
+    if section is None:
+        raise RuntimeError(f"Policy-loop GRPO replay missing section at index {int(index)}")
+    if key not in section:
+        raise RuntimeError(f"Policy-loop GRPO replay missing field {key!r} at index {int(index)}")
+    return section[key]
 
 
 def set_front_obstacle_aux(replay: MutableMapping[str, Any], *, info: Mapping[str, Any]) -> None:

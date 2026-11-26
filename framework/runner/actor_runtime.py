@@ -19,7 +19,12 @@ from framework.io.buffer import (
     wait_for_version,
     write_actor_failure,
 )
+from framework.lightning.config import resolve_policy_loop_grpo_config
 from framework.rollout import collect_single_env_shard, collect_vector_env_shards
+from framework.rollout.policy_loop_branch import (
+    collect_policy_loop_grpo_for_shard,
+    keyframe_steps_from_config,
+)
 from framework.rollout.timing import format_rollout_timing_summary
 from framework.runner.agent_factory import build_agent
 from framework.runner.actor_heartbeat import PeriodicActorHeartbeat
@@ -205,6 +210,16 @@ def _actor_main_impl(
     runtime_cfg = resolve_actor_env_runtime(cfg)
     num_envs_per_actor = int(runtime_cfg["num_envs_per_actor"])
     vec_env_mode = str(runtime_cfg["vec_env_mode"])
+    policy_loop_grpo_cfg = resolve_policy_loop_grpo_config(train_cfg)
+    if bool(policy_loop_grpo_cfg["enabled"]) and num_envs_per_actor != 1:
+        raise ValueError("Policy-loop GRPO MVP currently requires actor_learner.num_envs_per_actor=1")
+    if bool(policy_loop_grpo_cfg["enabled"]):
+        reward_source = (
+            "train.policy_loop_grpo.reward"
+            if policy_loop_grpo_cfg["reward"] is not None
+            else "env.reward"
+        )
+        stage(f"[actor{actor_id}] policy_loop_grpo branch_reward_source={reward_source}")
 
     if torch.cuda.is_available():
         if gpu_id is None:
@@ -328,6 +343,27 @@ def _actor_main_impl(
 
             if obs is None:
                 obs, _info = env.reset()
+            shard_start_info = dict(_info) if isinstance(_info, dict) else {}
+            policy_loop_episode_id = (
+                f"actor{int(actor_id)}-v{int(local_ver)}-shard{int(shard_idx)}-{uuid.uuid4().hex[:12]}"
+                if bool(policy_loop_grpo_cfg["enabled"])
+                else ""
+            )
+            policy_loop_branch_snapshots: Dict[int, Any] = {}
+            policy_loop_snapshot_steps: tuple[int, ...] = ()
+            branch_bootstrap = str(policy_loop_grpo_cfg.get("branch_bootstrap", "auto"))
+            if bool(policy_loop_grpo_cfg["enabled"]) and branch_bootstrap != "prefix_replay":
+                supports_fn = getattr(env, "supports_branch_snapshots", None)
+                supports_snapshots = bool(supports_fn()) if callable(supports_fn) else False
+                if branch_bootstrap == "snapshot" and not supports_snapshots:
+                    raise RuntimeError(
+                        "policy_loop_grpo.branch_bootstrap=snapshot requires an environment "
+                        "with exact branch snapshot support"
+                    )
+                if supports_snapshots and int(shard_start_info.get("start_frame", -1)) == 0:
+                    policy_loop_snapshot_steps = tuple(
+                        int(step) for step, _time_s in keyframe_steps_from_config(policy_loop_grpo_cfg)
+                    )
             try:
                 heartbeat("collect_single_start", force=True)
                 shard, obs, _info = collect_single_env_shard(
@@ -350,6 +386,8 @@ def _actor_main_impl(
                     debug_replay_logp_tolerance=float(debug_replay_logp_tolerance),
                     debug_replay_logp_fail_on_error=bool(debug_replay_logp_fail_on_error),
                     debug_replay_logp_log_fn=stage,
+                    branch_snapshot_steps=policy_loop_snapshot_steps,
+                    branch_snapshot_sink=policy_loop_branch_snapshots,
                 )
             except Exception:
                 if close_env_between_shards:
@@ -357,10 +395,73 @@ def _actor_main_impl(
                     obs = None
                     _info = None
                 raise
+            if bool(policy_loop_grpo_cfg["enabled"]) and isinstance(shard.get("meta", None), dict):
+                start_frame = shard_start_info.get("start_frame", None)
+                shard["meta"]["policy_loop_episode_start"] = bool(
+                    start_frame is not None and int(start_frame) == 0
+                )
+                shard["meta"]["policy_loop_episode_id"] = str(policy_loop_episode_id)
+                shard["meta"]["policy_loop_episode_start_info"] = {
+                    key: shard_start_info[key]
+                    for key in (
+                        "scene",
+                        "scene_id",
+                        "scenario_index",
+                        "start_frame",
+                        "official_scene_name",
+                        "hugsim_scenario_path",
+                    )
+                    if key in shard_start_info
+                }
             if close_env_between_shards:
                 _close_env_for_actor(env, actor_id=int(actor_id))
                 obs = None
                 _info = None
+            if bool(policy_loop_grpo_cfg["enabled"]):
+                heartbeat("policy_loop_grpo_start", force=True)
+                branch_t0 = time.perf_counter()
+
+                def branch_env_factory(keyframe_step: int, candidate_index: int) -> Any:
+                    worker_token = (
+                        int(actor_id) * 1_000_000
+                        + int(shard_idx) * 10_000
+                        + int(keyframe_step) * 100
+                        + int(candidate_index)
+                    )
+                    return build_actor_env(
+                        cfg,
+                        cuda=int(cuda if cuda >= 0 else 0),
+                        actor_id=int(actor_id),
+                        worker_id=int(worker_token),
+                        total_actors=(
+                            int(total_actors)
+                            if total_actors is not None
+                            else max(1, int(al_cfg.get("num_actors", 1)))
+                        ),
+                        reward_cfg_override=policy_loop_grpo_cfg["reward"],
+                    )
+
+                policy_loop_summary = collect_policy_loop_grpo_for_shard(
+                    shard,
+                    agent=agent,
+                    env_factory=branch_env_factory,
+                    config=policy_loop_grpo_cfg,
+                    branch_snapshots=policy_loop_branch_snapshots,
+                )
+                policy_loop_s = float(time.perf_counter() - branch_t0)
+                if isinstance(shard.get("meta", None), dict):
+                    shard_timing = dict((shard["meta"].get("timing", {}) or {}))
+                    shard_timing["policy_loop_grpo_s"] = policy_loop_s
+                    shard["meta"]["timing"] = shard_timing
+                heartbeat("policy_loop_grpo_done", force=True)
+                stage(
+                    f"[actor{actor_id}] policy_loop_grpo "
+                    f"keyframes={int(policy_loop_summary.get('keyframes', 0))} "
+                    f"valid_candidates={int(policy_loop_summary.get('valid_candidates', 0))} "
+                    f"snapshot_keyframes={int(policy_loop_summary.get('snapshot_keyframes', 0))} "
+                    f"prefix_replay_keyframes={int(policy_loop_summary.get('prefix_replay_keyframes', 0))} "
+                    f"took={policy_loop_s:.2f}s"
+                )
             if _stop_before_writing_shard(paths, actor_id=int(actor_id), shard_count=1):
                 break
             name = f"actor{actor_id}_e0_v{local_ver}_t{int(time.time())}_{uuid.uuid4().hex[:8]}.pt"

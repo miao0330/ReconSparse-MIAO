@@ -52,7 +52,7 @@ if [[ "$HAS_EXPLICIT_REINFORCEPP_CONFIG" == "0" ]]; then
   EXTRA_ARGS+=(--reinforcepp-config "$DEFAULT_REINFORCEPP_CONFIG")
 fi
 if [[ "$HAS_EXPLICIT_REINFORCEPP_ALGO_TAG" == "0" ]]; then
-  EXTRA_ARGS+=(--reinforcepp-algo-tag hugsim_sparsedrive_v1_collision_only_reinforcepp_nogrpo_noaux_peak1e4_decay5e5_update32)
+  EXTRA_ARGS+=(--reinforcepp-algo-tag /htfs/filesystem_pfs/waytous/lixm/ReconSparse/script/configs/sparsedrive_v2/20260616_template_HUGSM_algo-dsl_12actor)
 fi
 if [[ "$HAS_EXPLICIT_SLOTS" == "0" ]]; then
   EXTRA_ARGS+=(--slots 0:0 1:1 2:2 3:3 4:4 5:5 6:6 7:7)
@@ -64,5 +64,5 @@ if [[ "$HAS_EXPLICIT_REPEAT_EVALS" == "0" ]]; then
   EXTRA_ARGS+=(--repeat-evals 2)
 fi
 
-exec /root/miniconda3/envs/recondreamerNew-rl/bin/python -u \
+exec /htfs/filesystem_pfs/waytous/lixm/miniconda3/envs/reconsparse/bin/python -u \
   "$REPO_ROOT/script/train_eval_pipeline.py" "$@" "${EXTRA_ARGS[@]}"

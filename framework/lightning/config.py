@@ -42,6 +42,21 @@ class ActorLearnerLightningConfig:
     grpo_debug_dir: str | None = None
     grpo_debug_max_batches: int = 0
     grpo_debug_top_k: int = 4
+    policy_loop_grpo_enabled: bool = False
+    policy_loop_grpo_coef: float = 0.0
+    policy_loop_grpo_num_candidates: int = 0
+    policy_loop_grpo_branch_horizon_steps: int = 16
+    policy_loop_grpo_branch_parallelism: int = 4
+    policy_loop_grpo_branch_bootstrap: str = "auto"
+    policy_loop_grpo_keyframe_times_s: tuple[float, ...] = (4.0, 8.0)
+    policy_loop_grpo_rl_step_s: float = 0.5
+    policy_loop_grpo_intervention_steps: int = 2
+    policy_loop_grpo_severe_offroad_lateral_m: float = 3.5
+    policy_loop_grpo_continuation_mode: str = "argmax"
+    policy_loop_grpo_deterministic_seed: bool = True
+    policy_loop_grpo_norm_eps: float = 1e-6
+    policy_loop_grpo_train_metric_heads_only: bool = True
+    policy_loop_grpo_metric_heads_prefix: str = "_trajectory_head.decoder.layers.1.metric_heads"
     aux_risk_decel_enabled: bool = False
     aux_risk_decel_coef: float = 0.0
     aux_risk_decel_dt_s: float = 0.5
@@ -144,6 +159,95 @@ def resolve_grpo_config(train_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return resolved
 
 
+def resolve_policy_loop_grpo_config(train_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    raw_cfg = train_cfg.get("policy_loop_grpo", {}) or {}
+    if not isinstance(raw_cfg, dict):
+        raise TypeError("train.policy_loop_grpo must be a mapping")
+
+    reward_cfg = raw_cfg.get("reward", None)
+    if reward_cfg is not None and not isinstance(reward_cfg, dict):
+        raise TypeError("train.policy_loop_grpo.reward must be a mapping")
+
+    enabled = bool(raw_cfg.get("enable", False))
+    coef = float(raw_cfg.get("coef", 0.0))
+    num_candidates = int(raw_cfg.get("num_candidates", 4))
+    branch_horizon_steps = int(raw_cfg.get("branch_horizon_steps", 16))
+    branch_parallelism = int(raw_cfg.get("branch_parallelism", 4))
+    branch_bootstrap = str(raw_cfg.get("branch_bootstrap", "auto")).strip().lower()
+    rl_step_s = float(raw_cfg.get("rl_step_s", 0.5))
+    intervention_steps = int(raw_cfg.get("intervention_steps", 2))
+    severe_offroad_lateral_m = float(raw_cfg.get("severe_offroad_lateral_m", 3.5))
+    norm_eps = float(raw_cfg.get("norm_eps", 1e-6))
+    train_metric_heads_only = bool(raw_cfg.get("train_metric_heads_only", True))
+    metric_heads_prefix = str(
+        raw_cfg.get("metric_heads_prefix", "_trajectory_head.decoder.layers.1.metric_heads")
+    ).strip()
+    continuation_mode = str(raw_cfg.get("continuation_mode", "argmax")).strip().lower()
+    keyframe_times_raw = raw_cfg.get("keyframe_times_s", [4.0, 8.0])
+    if not isinstance(keyframe_times_raw, (list, tuple)):
+        raise TypeError("train.policy_loop_grpo.keyframe_times_s must be a list or tuple")
+    keyframe_times_s = tuple(float(value) for value in keyframe_times_raw)
+
+    if enabled:
+        if coef <= 0.0:
+            raise ValueError("train.policy_loop_grpo.coef must be > 0 when enabled")
+        if num_candidates < 2:
+            raise ValueError("train.policy_loop_grpo.num_candidates must be >= 2 when enabled")
+        if branch_horizon_steps <= 0:
+            raise ValueError("train.policy_loop_grpo.branch_horizon_steps must be > 0 when enabled")
+        if branch_parallelism <= 0:
+            raise ValueError("train.policy_loop_grpo.branch_parallelism must be > 0 when enabled")
+        if branch_bootstrap not in {"auto", "snapshot", "prefix_replay"}:
+            raise ValueError(
+                "train.policy_loop_grpo.branch_bootstrap must be one of: auto, snapshot, prefix_replay"
+            )
+        if rl_step_s <= 0.0:
+            raise ValueError("train.policy_loop_grpo.rl_step_s must be > 0 when enabled")
+        if intervention_steps <= 0 or intervention_steps > branch_horizon_steps:
+            raise ValueError(
+                "train.policy_loop_grpo.intervention_steps must be in [1, branch_horizon_steps] when enabled"
+            )
+        if severe_offroad_lateral_m <= 0.0:
+            raise ValueError(
+                "train.policy_loop_grpo.severe_offroad_lateral_m must be > 0 when enabled"
+            )
+        if norm_eps <= 0.0:
+            raise ValueError("train.policy_loop_grpo.norm_eps must be > 0 when enabled")
+        if train_metric_heads_only and not metric_heads_prefix:
+            raise ValueError(
+                "train.policy_loop_grpo.metric_heads_prefix must be non-empty when train_metric_heads_only=true"
+            )
+        if continuation_mode not in {"argmax", "greedy", "max"}:
+            raise ValueError("train.policy_loop_grpo.continuation_mode must be 'argmax' for the MVP")
+        if not keyframe_times_s or any(value <= 0.0 for value in keyframe_times_s):
+            raise ValueError("train.policy_loop_grpo.keyframe_times_s must contain positive times")
+        if len(set(keyframe_times_s)) != len(keyframe_times_s):
+            raise ValueError("train.policy_loop_grpo.keyframe_times_s must not contain duplicates")
+    else:
+        coef = 0.0
+
+    return {
+        "enabled": enabled,
+        "coef": coef,
+        "num_candidates": num_candidates,
+        "branch_horizon_steps": branch_horizon_steps,
+        "branch_parallelism": branch_parallelism,
+        "branch_bootstrap": branch_bootstrap,
+        "keyframe_times_s": tuple(sorted(keyframe_times_s)),
+        "rl_step_s": rl_step_s,
+        "intervention_steps": intervention_steps,
+        "severe_offroad_lateral_m": severe_offroad_lateral_m,
+        "continuation_mode": continuation_mode,
+        "deterministic_seed": bool(raw_cfg.get("deterministic_seed", True)),
+        "norm_eps": norm_eps,
+        "train_metric_heads_only": train_metric_heads_only,
+        "metric_heads_prefix": metric_heads_prefix,
+        # None keeps env.reward for backward compatibility. A mapping is an
+        # explicit independent reward configuration for policy-loop branches.
+        "reward": reward_cfg,
+    }
+
+
 def resolve_auxiliary_objectives_config(train_cfg: Dict[str, Any]) -> Dict[str, Any]:
     aux_cfg = train_cfg.get("auxiliary", {}) or {}
     if not isinstance(aux_cfg, dict):
@@ -177,6 +281,7 @@ def actor_learner_lightning_config_from_algorithm(
 ) -> ActorLearnerLightningConfig:
     algo_kind = str(algo_meta.get("algo_key", getattr(algo, "variant", "ppo")))
     grpo_cfg = resolve_grpo_config(train_cfg)
+    policy_loop_grpo_cfg = resolve_policy_loop_grpo_config(train_cfg)
     aux_cfg = resolve_auxiliary_objectives_config(train_cfg)
     lr_scheduler_cfg = resolve_lr_scheduler_config(train_cfg, actor_learner_cfg)
     rpp_cfg, _ppo_cfg, sac_cfg = closed_loop_algorithm_configs(train_cfg)
@@ -240,6 +345,23 @@ def actor_learner_lightning_config_from_algorithm(
         grpo_debug_dir=grpo_cfg["debug_dir"],
         grpo_debug_max_batches=int(grpo_cfg["debug_max_batches"]),
         grpo_debug_top_k=int(grpo_cfg["debug_top_k"]),
+        policy_loop_grpo_enabled=bool(policy_loop_grpo_cfg["enabled"]),
+        policy_loop_grpo_coef=float(policy_loop_grpo_cfg["coef"]),
+        policy_loop_grpo_num_candidates=int(policy_loop_grpo_cfg["num_candidates"]),
+        policy_loop_grpo_branch_horizon_steps=int(policy_loop_grpo_cfg["branch_horizon_steps"]),
+        policy_loop_grpo_branch_parallelism=int(policy_loop_grpo_cfg["branch_parallelism"]),
+        policy_loop_grpo_branch_bootstrap=str(policy_loop_grpo_cfg["branch_bootstrap"]),
+        policy_loop_grpo_keyframe_times_s=tuple(policy_loop_grpo_cfg["keyframe_times_s"]),
+        policy_loop_grpo_rl_step_s=float(policy_loop_grpo_cfg["rl_step_s"]),
+        policy_loop_grpo_intervention_steps=int(policy_loop_grpo_cfg["intervention_steps"]),
+        policy_loop_grpo_severe_offroad_lateral_m=float(
+            policy_loop_grpo_cfg["severe_offroad_lateral_m"]
+        ),
+        policy_loop_grpo_continuation_mode=str(policy_loop_grpo_cfg["continuation_mode"]),
+        policy_loop_grpo_deterministic_seed=bool(policy_loop_grpo_cfg["deterministic_seed"]),
+        policy_loop_grpo_norm_eps=float(policy_loop_grpo_cfg["norm_eps"]),
+        policy_loop_grpo_train_metric_heads_only=bool(policy_loop_grpo_cfg["train_metric_heads_only"]),
+        policy_loop_grpo_metric_heads_prefix=str(policy_loop_grpo_cfg["metric_heads_prefix"]),
         aux_risk_decel_enabled=bool(aux_cfg["risk_decel_enabled"]),
         aux_risk_decel_coef=float(aux_cfg["risk_decel_coef"]),
         aux_risk_decel_dt_s=float(aux_cfg["risk_decel_dt_s"]),
@@ -327,5 +449,6 @@ __all__ = [
     "optimizer_config_from_algorithm",
     "resolve_auxiliary_objectives_config",
     "resolve_grpo_config",
+    "resolve_policy_loop_grpo_config",
     "trainer_kwargs_from_learner_config",
 ]

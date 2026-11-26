@@ -264,6 +264,8 @@ def collect_single_env_shard(
     debug_replay_logp_tolerance: float = 1.0e-5,
     debug_replay_logp_fail_on_error: bool = False,
     debug_replay_logp_log_fn: Callable[[str], None] | None = None,
+    branch_snapshot_steps: Sequence[int] = (),
+    branch_snapshot_sink: Dict[int, Any] | None = None,
 ) -> tuple[Dict[str, Any], Any]:
     obs_buf: List[torch.Tensor] = []
     old_logp_buf: List[torch.Tensor] = []
@@ -282,6 +284,9 @@ def collect_single_env_shard(
     counters: Dict[str, int] = {"done_count": 0, "reset_count": 0}
     reward_summary = _reward_summary_defaults()
     needs_reset_after = False
+    snapshot_steps = {int(step) for step in branch_snapshot_steps}
+    if snapshot_steps and branch_snapshot_sink is None:
+        raise ValueError("branch_snapshot_sink is required when branch_snapshot_steps is non-empty")
 
     step_count = 0
     collect_t0 = time.perf_counter()
@@ -289,6 +294,14 @@ def collect_single_env_shard(
         _emit_heartbeat(heartbeat_fn, "collect_single_step", step_count)
         obs_decision = obs
         step_timing: Dict[str, float] = {}
+        if step_count in snapshot_steps:
+            capture = getattr(env, "capture_branch_state", None)
+            if not callable(capture):
+                raise RuntimeError("Environment does not support capture_branch_state at policy-loop keyframe")
+            assert branch_snapshot_sink is not None
+            snapshot_t0 = time.perf_counter()
+            branch_snapshot_sink[int(step_count)] = capture()
+            step_timing["branch_snapshot_capture_s"] = float(time.perf_counter() - snapshot_t0)
         obs_t: torch.Tensor | None = None
         if bool(store_obs):
             t0 = time.perf_counter()

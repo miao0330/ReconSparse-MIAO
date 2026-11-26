@@ -1,0 +1,36 @@
+env:
+  reward:
+    mode: craft_sparse_loop
+    craft_sparse_loop:
+      CRAFT:
+        real_reward_model: corrective
+        off_global_route_threshold_m: 6.0
+        lateral_safe_m: 0.2
+        lateral_max_m: 3.0
+        heading_max_deg: 60.0
+        corrective_progress:
+          enable: true
+          weight: 0.0
+          max_m: 1.2
+          min_m: 0.0
+          lateral_safe_m: 0.3
+          lateral_max_m: 2.5
+          heading_max_deg: 60.0
+          w_lateral_efficiency: 0.0
+          w_heading_efficiency: 0.0
+          efficiency_floor: 0.0
+        corrective:
+          cost_off_road: 0.0
+          cost_emergency_lane: 0.0
+          cost_off_global_route: 0.0
+          cost_red_light: 0.0
+          cost_stop_sign: 0.0
+          cost_collision: 500.0
+        map:
+          center_dev_max_m: 2.0
+          heading_dev_max_deg: 90.0
+          off_global_route_threshold_m: 6.0
+          reverse_dot_threshold: -0.5
+          same_dir_dot_threshold: 0.2
+          same_dir_distance_margin_m: 0.75
+          opposite_min_lateral_m: 0.0

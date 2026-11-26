@@ -83,15 +83,19 @@ export PYTHONPATH=/root/clone/ReconDreamer-RL:${PYTHONPATH:-}
 
 ### 3.2 配置 CUDA 扩展编译环境
 
-本项目通常依赖 CUDA 11.8、PyTorch CUDA 扩展、`gsplat` 和 `nvdiffrast`。
+本项目通常依赖 PyTorch CUDA 扩展、`gsplat` 和 `nvdiffrast`。不要硬编码不存在的 `/usr/local/cuda-11.8`；优先使用当前 conda 环境里的 `nvcc` 和 `nvidia/cuda_runtime` 头文件。
 
 ```bash
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-11.8}"
-export PATH="$CUDA_HOME/bin:$PATH"
-export CPATH="$CUDA_HOME/include:${CPATH:-}"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-export TORCH_EXTENSIONS_DIR=/root/clone/ReconDreamer-RL/.cache/torch_extensions
+cd /path/to/ReconSparse
+source script/setup_train_env.sh
 ```
+
+该脚本会自动设置：
+
+- `PYTHONPATH` → 仓库根目录
+- `CUDA_HOME` → 优先 `$CONDA_PREFIX`（含 conda 的 `cuda-nvcc`），否则回退到 `/usr/local/cuda*`
+- `CPATH` / `LD_LIBRARY_PATH` → 包含 `nvidia/cuda_runtime` 的 include/lib（若系统 CUDA 没有 `include/cuda_runtime.h`）
+- `TORCH_EXTENSIONS_DIR` → `ReconSparse/.cache/torch_extensions`
 
 检查 CUDA：
 

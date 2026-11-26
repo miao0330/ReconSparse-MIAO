@@ -6,6 +6,7 @@ from typing import Any, Dict
 import torch
 
 from framework.runner.config_normalization import normalize_train_algorithm_cfg
+from framework.lightning.config import resolve_policy_loop_grpo_config
 from framework.utils.repo_paths import resolve_ego_ads_subdir, resolve_repo_path
 
 
@@ -21,6 +22,9 @@ def build_agent(cfg: Dict[str, Any], *, device: torch.device) -> Any:
     train_cfg = cfg.get("train", {}) or {}
     agent_cfg = cfg.get("agent", {}) or {}
     agent_type = str(agent_cfg.get("type", "ddv2")).strip().lower().replace("-", "_")
+    policy_loop_grpo_cfg = resolve_policy_loop_grpo_config(train_cfg)
+    if bool(policy_loop_grpo_cfg["enabled"]) and agent_type not in {"sparsedrive_v2", "sparsedrivev2", "sdv2"}:
+        raise ValueError("Policy-loop GRPO stage 1 currently supports only agent.type=sparsedrive_v2")
     ckpt_path = agent_cfg.get("ckpt", None)
     policy_execute_mode = _normalize_policy_execute_mode(
         train_cfg.get(
@@ -68,6 +72,21 @@ def build_agent(cfg: Dict[str, Any], *, device: torch.device) -> Any:
         grpo_cfg = train_cfg.get("grpo", {}) or {}
         if not isinstance(grpo_cfg, dict):
             grpo_cfg = {}
+        if bool(policy_loop_grpo_cfg["enabled"]) and bool(policy_loop_grpo_cfg["train_metric_heads_only"]):
+            required_prefix = str(policy_loop_grpo_cfg["metric_heads_prefix"])
+            configured_prefixes = [str(value).strip() for value in (trainable_prefixes or []) if str(value).strip()]
+            if configured_prefixes and configured_prefixes != [required_prefix]:
+                raise ValueError(
+                    "Policy-loop GRPO train_metric_heads_only=true requires "
+                    f"agent.trainable_prefixes=[{required_prefix!r}], got {configured_prefixes!r}"
+                )
+            trainable_prefixes = [required_prefix]
+        static_candidate_count = int(grpo_cfg.get("num_candidates", 0) or 0)
+        policy_loop_candidate_count = (
+            int(policy_loop_grpo_cfg["num_candidates"] or 0)
+            if bool(policy_loop_grpo_cfg["enabled"])
+            else 0
+        )
         nuscenes_scorer_config = dict(grpo_cfg.get("scorer", {}) or {})
         for key in ("scene_cache_root", "agent_state_cache_root", "ea_project_src", "nuscenes_dataroot"):
             if key in nuscenes_scorer_config and nuscenes_scorer_config[key] is not None:
@@ -77,10 +96,11 @@ def build_agent(cfg: Dict[str, Any], *, device: torch.device) -> Any:
             device=str(device),
             rl_lr=float(train_cfg.get("policy_lr", train_cfg.get("ddv2_lr", 1e-5))),
             execute_mode=policy_execute_mode,
+            image_preprocess=str(agent_cfg.get("image_preprocess", "legacy_hf")),
             trainable_prefixes=trainable_prefixes,
             frozen_prefixes=frozen_prefixes,
             nuscenes_scorer_config=nuscenes_scorer_config,
-            grpo_num_candidates=int(grpo_cfg.get("num_candidates", 0) or 0),
+            grpo_num_candidates=max(static_candidate_count, policy_loop_candidate_count),
         )
     from framework.agent.diffusiondrive_v2 import DiffusionDriveV2Policy
 

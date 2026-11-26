@@ -1,0 +1,9 @@
+train:
+  algo: ppo
+  closed_loop:
+    ppo:
+      value_clip_eps: 0.0
+      kl_coef: 0.03
+      forward_kl_coef: 0.01
+      reverse_kl_coef: 0.01
+      distill_temperature: 1.0

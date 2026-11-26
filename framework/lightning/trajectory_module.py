@@ -10,12 +10,18 @@ import torch
 import torch.nn.functional as F
 
 from framework.algorithms.grpo import compute_grpo_objective, compute_risk_decel_auxiliary_objective
+from framework.algorithms.policy_loop_grpo import compute_policy_loop_grpo_objective
 from framework.algorithms.ppo import compute_ppo_metrics, compute_ppo_objective
 from framework.algorithms.reinforcepp import compute_reinforce_metrics, compute_reinforce_objective
 from framework.algorithms.sac import compute_sac_objective
 from framework.lightning.config import ActorLearnerLightningConfig
 from framework.lightning_compat import L
-from framework.replay_schema import get_front_obstacle_aux, get_policy_model_inputs
+from framework.replay_schema import (
+    get_front_obstacle_aux,
+    get_policy_loop_grpo,
+    get_policy_model_inputs,
+    require_policy_loop_grpo_field,
+)
 from framework.runner.logging import _exception_is_cuda_oom, log_cuda_memory_snapshot
 
 
@@ -360,6 +366,148 @@ class TrajectoryLightningModule(L.LightningModule):
         if torch.is_tensor(new_logp):
             outputs["new_logp"] = new_logp.to(device=device, dtype=torch.float32).view(-1)
         return outputs
+
+    def _maybe_apply_policy_loop_grpo_loss(
+        self,
+        *,
+        replay: list[Dict[str, Any]],
+        device: torch.device,
+        batch_idx: int,
+        loss: torch.Tensor,
+        metrics: Dict[str, torch.Tensor],
+        timing_parts: Dict[str, float] | None = None,
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        coef = float(getattr(self.learner_config, "policy_loop_grpo_coef", 0.0))
+        enabled = bool(getattr(self.learner_config, "policy_loop_grpo_enabled", False))
+        if not enabled or coef <= 0.0:
+            return loss, metrics
+
+        eligible = [rep for rep in replay if get_policy_loop_grpo(rep) is not None]
+        if not eligible:
+            return loss, metrics
+        fused_fn = getattr(self.agent, "replay_policy_outputs_from_replay_batch", None)
+        if not callable(fused_fn):
+            raise RuntimeError(
+                "Policy-loop GRPO requires agent.replay_policy_outputs_from_replay_batch(...)"
+            )
+
+        t0 = time.perf_counter()
+        outputs = fused_fn(
+            eligible,
+            eta=float(self.learner_config.eta),
+            num_candidates=int(self.learner_config.policy_loop_grpo_num_candidates),
+            candidate_select="topk",
+        )
+        candidates = outputs.get("counterfactual", None) if isinstance(outputs, dict) else None
+        if not isinstance(candidates, dict):
+            raise RuntimeError("Policy-loop GRPO agent output is missing counterfactual candidates")
+        if timing_parts is not None:
+            timing_parts["policy_loop_grpo_policy_s"] = float(time.perf_counter() - t0)
+
+        stored_mode_indices = torch.stack(
+            [
+                torch.as_tensor(
+                    require_policy_loop_grpo_field(rep, "mode_indices", index=index),
+                    device=device,
+                    dtype=torch.long,
+                ).view(-1)
+                for index, rep in enumerate(eligible)
+            ],
+            dim=0,
+        )
+        candidate_returns = torch.stack(
+            [
+                torch.as_tensor(
+                    require_policy_loop_grpo_field(rep, "candidate_returns", index=index),
+                    device=device,
+                    dtype=torch.float32,
+                ).view(-1)
+                for index, rep in enumerate(eligible)
+            ],
+            dim=0,
+        )
+        valid_mask = torch.stack(
+            [
+                torch.as_tensor(
+                    require_policy_loop_grpo_field(rep, "valid_mask", index=index),
+                    device=device,
+                    dtype=torch.bool,
+                ).view(-1)
+                for index, rep in enumerate(eligible)
+            ],
+            dim=0,
+        )
+        if tuple(stored_mode_indices.shape) != tuple(candidate_returns.shape) or tuple(valid_mask.shape) != tuple(
+            candidate_returns.shape
+        ):
+            raise RuntimeError(
+                "Policy-loop GRPO replay mode_indices, candidate_returns, and valid_mask shapes must match"
+            )
+
+        available_mode_indices = candidates.get("mode_indices", None)
+        old_log_probs = candidates.get("old_log_probs", None)
+        new_log_probs = candidates.get("log_probs", None)
+        if not torch.is_tensor(available_mode_indices) or not torch.is_tensor(old_log_probs) or not torch.is_tensor(
+            new_log_probs
+        ):
+            raise RuntimeError(
+                "Policy-loop GRPO candidates require tensor mode_indices, old_log_probs, and log_probs"
+            )
+        available_mode_indices = available_mode_indices.to(device=device, dtype=torch.long)
+        old_log_probs = old_log_probs.to(device=device, dtype=torch.float32)
+        new_log_probs = new_log_probs.to(device=device, dtype=torch.float32)
+        if tuple(available_mode_indices.shape) != tuple(old_log_probs.shape) or tuple(new_log_probs.shape) != tuple(
+            old_log_probs.shape
+        ):
+            raise RuntimeError("Policy-loop GRPO agent candidate tensor shapes must match")
+
+        gather_rows: list[torch.Tensor] = []
+        for row_index in range(int(stored_mode_indices.shape[0])):
+            matches = stored_mode_indices[row_index][:, None] == available_mode_indices[row_index][None, :]
+            present = matches.any(dim=1)
+            if not bool(present.all().item()):
+                missing = stored_mode_indices[row_index][~present].detach().cpu().tolist()
+                raise RuntimeError(
+                    "Policy-loop GRPO stored candidate identities are absent from current policy outputs; "
+                    f"row={row_index} missing={missing[:8]}"
+                )
+            gather_rows.append(matches.to(dtype=torch.long).argmax(dim=1))
+        gather_indices = torch.stack(gather_rows, dim=0)
+        selected_new_log_probs = torch.gather(new_log_probs, dim=1, index=gather_indices)
+        selected_old_log_probs = torch.gather(old_log_probs, dim=1, index=gather_indices)
+
+        t0 = time.perf_counter()
+        objective = compute_policy_loop_grpo_objective(
+            candidate_log_probs=selected_new_log_probs,
+            old_candidate_log_probs=selected_old_log_probs,
+            candidate_returns=candidate_returns,
+            valid_mask=valid_mask,
+            score_norm_eps=float(self.learner_config.policy_loop_grpo_norm_eps),
+            clip_eps=float(self.learner_config.clip_eps),
+        )
+        if timing_parts is not None:
+            timing_parts["policy_loop_grpo_objective_s"] = float(time.perf_counter() - t0)
+        self._maybe_report_slow_step_part(
+            name="policy_loop_grpo_objective",
+            seconds=float(time.perf_counter() - t0),
+            batch_idx=batch_idx,
+        )
+        out_metrics = dict(metrics)
+        out_metrics.update(
+            {
+                "policy_loop_grpo_loss": objective.loss.detach(),
+                "policy_loop_grpo_return_mean": objective.score_mean.detach(),
+                "policy_loop_grpo_return_std": objective.score_std.detach(),
+                "policy_loop_grpo_return_min": objective.score_min.detach(),
+                "policy_loop_grpo_return_max": objective.score_max.detach(),
+                "policy_loop_grpo_approx_kl": objective.approx_kl.detach(),
+                "policy_loop_grpo_clip_frac": objective.clip_frac.detach(),
+                "policy_loop_grpo_ratio_mean": objective.ratio_mean.detach(),
+                "policy_loop_grpo_active_groups": objective.active_groups.detach(),
+                "policy_loop_grpo_active_candidates": objective.active_candidates.detach(),
+            }
+        )
+        return loss + coef * objective.loss, out_metrics
 
     def _risk_decel_high_risk_mask_from_replay(
         self,
@@ -767,6 +915,15 @@ class TrajectoryLightningModule(L.LightningModule):
                     timing_parts=timing_parts,
                     candidates=fused_candidates,
                 )
+
+            loss, metrics = self._maybe_apply_policy_loop_grpo_loss(
+                replay=replay,
+                device=device,
+                batch_idx=batch_idx,
+                loss=loss,
+                metrics=metrics,
+                timing_parts=timing_parts,
+            )
 
             t0 = time.perf_counter()
             distill_metrics = _maybe_compute_distillation_metrics(

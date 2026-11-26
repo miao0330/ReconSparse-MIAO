@@ -14,6 +14,8 @@ from typing import Any
 
 import yaml
 
+from framework.runner.config_loader import load_composed_yaml
+
 '''
 #####################
 Runs only reinforcepp by default.
@@ -36,15 +38,17 @@ python -u script/train_eval_pipeline.py \
 '''
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HUGSIM_ROOT = Path(os.environ.get("HUGSIM_ROOT", "/root/clone/HUGSIM-ORI")).resolve()
+HUGSIM_ROOT = Path(os.environ.get("HUGSIM_ROOT", "/htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI")).resolve()
 SPARSEDRIVE_V1_CKPT_DIR = REPO_ROOT / "egoADs" / "SparseDrive" / "ckpt"
 SPARSEDRIVE_V2_CKPT_DIR = REPO_ROOT / "egoADs" / "SparseDriveV2" / "ckpt"
-DEFAULT_TRAIN_PYTHON = Path("/root/miniconda3/envs/recondreamerNew-rl/bin/python")
+DIFFUSIONDRIVE_V2_CKPT_DIR = REPO_ROOT / "egoADs" / "DiffusionDriveV2" / "ckpt"
+DEFAULT_TRAIN_PYTHON = Path("/htfs/filesystem_pfs/waytous/lixm/miniconda3/envs/reconsparse/bin/python")
 DEFAULT_HUGSIM_TEMPLATE = HUGSIM_ROOT / "configs" / "sim" / "nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml"
+DEFAULT_DDV2_HUGSIM_TEMPLATE = HUGSIM_ROOT / "configs" / "sim" / "nuscenes_eval_diffusiondrive_v2.yaml"
 DEFAULT_SCENARIO_DIR = HUGSIM_ROOT / "configs" / "scenarios" / "nuscenes"
 DEFAULT_EVAL_OUTPUT_ROOT = HUGSIM_ROOT / "outputs" / "evaluate-auto"
 DEFAULT_PPO_CONFIG = REPO_ROOT / "script" / "configs" / "sparsedrive_v2" / "20260616_template_HUGSM_algo-dsl.yaml"
-DEFAULT_REINFORCEPP_CONFIG = REPO_ROOT / "script" / "configs" / "sparsedrive_v2" / "20260616_template_HUGSM_algo-dsl.yaml"
+DEFAULT_REINFORCEPP_CONFIG = REPO_ROOT / "script" / "configs" / "sparsedrive_v2" / "20260616_template_HUGSM_algo-dsl_12actor.yaml"
 DEFAULT_RUN_ROOT = REPO_ROOT / "outputs" / "TrainEvaluationAuto"
 DEFAULT_EVAL_SLOTS = ["0:0", "1:1", "2:2", "3:3", "4:4", "5:5", "6:6", "7:7"]
 DEFAULT_MAX_SCENES = 88
@@ -114,6 +118,8 @@ def resolve_agent_type(config: dict[str, Any]) -> str:
         return "sparsedrive_v1"
     if raw_type in {"sparsedrive_v2", "sparsedrivev2", "sdv2"}:
         return "sparsedrive_v2"
+    if raw_type in {"ddv2", "diffusiondrive_v2", "diffusiondrivev2"}:
+        return "diffusiondrive_v2"
     raise ValueError(f"Unsupported train/eval pipeline agent.type: {agent_cfg.get('type')!r}")
 
 
@@ -123,6 +129,8 @@ def ckpt_dir_for_agent_type(agent_type: str) -> Path:
         return SPARSEDRIVE_V1_CKPT_DIR
     if normalized == "sparsedrive_v2":
         return SPARSEDRIVE_V2_CKPT_DIR
+    if normalized == "diffusiondrive_v2":
+        return DIFFUSIONDRIVE_V2_CKPT_DIR
     raise ValueError(f"Unsupported checkpoint agent type: {agent_type!r}")
 
 
@@ -132,6 +140,8 @@ def eval_tool_for_agent_type(agent_type: str) -> Path:
         return REPO_ROOT / "tools" / "evaluate_existing_sparsedrive_v1_ckpts.py"
     if normalized == "sparsedrive_v2":
         return REPO_ROOT / "tools" / "evaluate_existing_sparsedrive_v2_ckpts.py"
+    if normalized == "diffusiondrive_v2":
+        return REPO_ROOT / "tools" / "evaluate_existing_diffusiondrive_v2_ckpts.py"
     raise ValueError(f"Unsupported evaluation agent type: {agent_type!r}")
 
 
@@ -332,7 +342,15 @@ def build_eval_existing_ckpt_command(
     max_scenes: int | None,
     retry_count: int,
     agent_type: str = "sparsedrive_v2",
+    sparsedrive_bridge_variant: str = "recon_policy",
+    sparsedrive_image_preprocess: str = "legacy_hf",
+    sparsedrive_camera_geometry: str = "rendered",
 ) -> list[str]:
+    if (
+        str(agent_type).strip().lower().replace("-", "_") == "diffusiondrive_v2"
+        and hugsim_template.resolve() == DEFAULT_HUGSIM_TEMPLATE.resolve()
+    ):
+        hugsim_template = DEFAULT_DDV2_HUGSIM_TEMPLATE
     cmd = [
         str(python_bin),
         "-u",
@@ -350,6 +368,17 @@ def build_eval_existing_ckpt_command(
         "--retry-count",
         str(int(retry_count)),
     ]
+    if str(agent_type).strip().lower().replace("-", "_") == "sparsedrive_v2":
+        cmd.extend(
+            [
+                "--sparsedrive-bridge-variant",
+                str(sparsedrive_bridge_variant),
+                "--sparsedrive-image-preprocess",
+                str(sparsedrive_image_preprocess),
+                "--sparsedrive-camera-geometry",
+                str(sparsedrive_camera_geometry),
+            ]
+        )
     if scenario_dir is not None:
         cmd.extend(["--scenario-dir", str(scenario_dir)])
     if max_scenes is not None:
@@ -359,7 +388,7 @@ def build_eval_existing_ckpt_command(
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload = load_composed_yaml(path)
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected mapping config: {path}")
     return payload
@@ -441,6 +470,9 @@ def _run_eval_existing_ckpt(
     retry_count: int,
     default_eval_seed: bool,
     hugsim_random_seed: str | int | None,
+    sparsedrive_bridge_variant: str,
+    sparsedrive_image_preprocess: str,
+    sparsedrive_camera_geometry: str,
 ) -> None:
     ckpt_stem = promoted_ckpt.stem
     run_name = f"{algo_tag}/{ckpt_stem}"
@@ -457,6 +489,9 @@ def _run_eval_existing_ckpt(
         scenario_dir=scenario_dir,
         max_scenes=max_scenes,
         retry_count=retry_count,
+        sparsedrive_bridge_variant=sparsedrive_bridge_variant,
+        sparsedrive_image_preprocess=sparsedrive_image_preprocess,
+        sparsedrive_camera_geometry=sparsedrive_camera_geometry,
     )
     log_path = run_root / "eval.log"
     env = os.environ.copy()
@@ -485,6 +520,21 @@ def parse_train_eval_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scenario-dir", type=Path, default=DEFAULT_SCENARIO_DIR)
     parser.add_argument("--max-scenes", type=int, default=DEFAULT_MAX_SCENES)
     parser.add_argument("--retry-count", type=int, default=2)
+    parser.add_argument(
+        "--sparsedrive-bridge-variant",
+        choices=("navsim", "recon_policy"),
+        default="recon_policy",
+    )
+    parser.add_argument(
+        "--sparsedrive-image-preprocess",
+        choices=("native", "legacy_hf"),
+        default="legacy_hf",
+    )
+    parser.add_argument(
+        "--sparsedrive-camera-geometry",
+        choices=("rendered", "navsim_lidar", "vehicle"),
+        default="rendered",
+    )
     parser.add_argument("--ppo", action="store_true", help="Run PPO in addition to the default ReinforcePP run")
     parser.add_argument("--skip-reinforcepp", action="store_true", help="Skip the default ReinforcePP run")
     parser.add_argument("--date-tag", type=str, default=time.strftime("%Y%m%d", time.gmtime()))
@@ -557,6 +607,9 @@ def main() -> int:
                 "slots": list(args.slots),
                 "scenario_dir": str(args.scenario_dir.resolve()) if args.scenario_dir is not None else None,
                 "max_scenes": args.max_scenes,
+                "sparsedrive_bridge_variant": str(args.sparsedrive_bridge_variant),
+                "sparsedrive_image_preprocess": str(args.sparsedrive_image_preprocess),
+                "sparsedrive_camera_geometry": str(args.sparsedrive_camera_geometry),
                 "cleanup_after_successful_eval": True,
             },
         )
@@ -585,6 +638,9 @@ def main() -> int:
             retry_count=int(args.retry_count),
             default_eval_seed=not bool(args.no_default_eval_seed),
             hugsim_random_seed=args.hugsim_random_seed,
+            sparsedrive_bridge_variant=str(args.sparsedrive_bridge_variant),
+            sparsedrive_image_preprocess=str(args.sparsedrive_image_preprocess),
+            sparsedrive_camera_geometry=str(args.sparsedrive_camera_geometry),
         )
         cleanup_training_artifacts(run_dir=run_dir, buffer_dir=buffer_dir)
     return 0

@@ -1,0 +1,11 @@
+train:
+  algo: sac
+  closed_loop:
+    sac:
+      entropy_coef: 0.01
+      kl_coef: 0.03
+      epochs: 1
+      norm_eps: 1.0e-8
+      forward_kl_coef: 0.01
+      reverse_kl_coef: 0.01
+      distill_temperature: 1.0

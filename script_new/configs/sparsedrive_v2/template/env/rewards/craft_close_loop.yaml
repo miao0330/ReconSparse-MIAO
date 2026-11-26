@@ -1,0 +1,42 @@
+env:
+  reward:
+    mode: craft_close_loop
+    craft_close_loop:
+      CRAFT:
+        real_reward_model: close loop
+        off_global_route_threshold_m: 3.0
+        lateral_safe_m: 0.25
+        lateral_max_m: 3.5
+        heading_max_deg: 75.0
+        progress_weight: 5.0
+        progress_max_m: 1.2
+        progress_min_m: 0.0
+        w_g: 2.0
+        w_c: 0.0
+        w_h: 1.5
+        efficiency_floor: 0.15
+        ddev_clip: 0.3
+        k_g: 0.35
+        k_c: 0.0
+        k_h: 0.5
+        correction_apply_thresh_global: 0.05
+        correction_apply_thresh_center: 0.05
+        correction_apply_thresh_heading: 0.05
+        correction_clip: 0.5
+        cost_off_road: 4.0
+        cost_opposite_lane: 0.5
+        cost_off_global_route: 3.0
+        cost_emergency_lane: 2.0
+        cost_red_light: 8.0
+        cost_stop_sign: 8.0
+        term_collision: 350.0
+        term_route_dev: 350.0
+        reward_completed: 0.0
+        map:
+          center_dev_max_m: 2.0
+          heading_dev_max_deg: 90.0
+          off_global_route_threshold_m: 3.0
+          reverse_dot_threshold: -0.5
+          same_dir_dot_threshold: 0.2
+          same_dir_distance_margin_m: 0.75
+          opposite_min_lateral_m: 0.0

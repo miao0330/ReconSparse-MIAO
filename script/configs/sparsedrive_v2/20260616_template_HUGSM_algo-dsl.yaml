@@ -12,22 +12,22 @@ env:
     allow_short_tail: false
     min: 0
   hugsim:
-    repo: /root/clone/HUGSIM-ORI
-    scenario_dir: /root/clone/HUGSIM-ORI/configs/scenarios/nuscenes
+    repo: /htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI
+    scenario_dir: /htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI/configs/scenarios/nuscenes
     scenes:
     - scene-0411-medium-00.yaml
-    base_path: /root/clone/HUGSIM-ORI/configs/sim/nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml
-    camera_path: /root/clone/HUGSIM-ORI/configs/sim/nuscenes_camera.yaml
-    kinematic_path: /root/clone/HUGSIM-ORI/configs/sim/kinematic.yaml
-    model_base: /OpenDataset/HUGSIM_data/scenes/nuscenes
+    base_path: /htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI/configs/sim/nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml
+    camera_path: /htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI/configs/sim/nuscenes_camera.yaml
+    kinematic_path: /htfs/filesystem_pfs/waytous/lixm/HUGSIM-ORI/configs/sim/kinematic.yaml
+    model_base: /htfs/filesystem_pfs/waytous/datasets/miao/HUGSIM-ORI/HUGSIM/scenes/nuscenes
     launch_mode: fifo
     pixi_cmd: pixi
     fifo_timeout_s: 300
     fifo_poll_interval_s: 0.2
     output_root: outputs/hugsim_rl
-    recon_data_root: /root/clone/ReconDreamer-RL/assets/nus/data
-    nuscenes_root: /root/clone/ReconDreamer-RL/assets/nuscenes/v1.0-trainval
-    frame2token_dir: /root/clone/ReconDreamer-RL/assets/nus/information/frame2token
+    recon_data_root: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/assets/nus/data
+    nuscenes_root: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/assets/nuscenes/v1.0-trainval
+    frame2token_dir: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/assets/nus/information/frame2token
     alignment:
       enabled: true
       max_rmse_m: 2.0
@@ -274,14 +274,14 @@ train:
   #   When selecting grpo, also check train.grpo.coef, objective, candidate_select, and scorer.
   #   When selecting aux, also check train.auxiliary.risk_decel.coef and other concrete loss parameters.
   ###########################################################################
-  algo: reinforcepp-nogrpo-noaux
+  algo: reinforcepp-grpo-aux  # 改这里实现对强化学习的开关
   wandb:
     enabled: true
     project: reconSparse
-    group: HUGSIM_Template_ReinforcePP_NoGRPO_NoAux_Substeps1
+    group: HUGSIM_Template_ReinforcePP_GRPO_Aux_Substeps1
   actor_learner:
     mode: async
-    buffer_dir: /root/clone/ReconDreamer-RL/outputs/actor_learner/HUGSIM_Template_ReinforcePP_NoGRPO_NoAux_Substeps1
+    buffer_dir: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/outputs/actor_learner/HUGSIM_Template_ReinforcePP_NoGRPO_NoAux_Substeps1
     timestamp_buffer_dir: true
     learner_gpu_id: 0
     learner_gpu_ids:
@@ -367,7 +367,7 @@ train:
     debug_top_k: 8
     scorer:
       backend: craft_carl
-      scene_cache_root: /root/clone/ReconDreamer-RL/assets/nus/cache
+      scene_cache_root: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/assets/nus/cache
       ea_gate_enabled: false
       driving_direction_gate_enabled: false
       center_dev_max_m: 2.0

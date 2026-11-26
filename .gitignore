@@ -6,6 +6,7 @@
 *.out
 *.cache
 *.npz
+*.pid
 
 # ----------------------
 # PyTorch / Lightning outputs
@@ -26,6 +27,7 @@
 # Local-only directories
 # ----------------------
 /visual/
+/htfs/
 /assets/   # symbolic links are ignored as well
 /DiffusionDriveV2/gtrs_traj/
 gtrs_traj/
@@ -80,6 +82,7 @@ RL-cky/
 
 # Keep only reusable visualization tools under version control.
 /tools/*
+!/tools/visualize_recondreamer_dataset.py
 !/tools/smalltool/
 /tools/smalltool/*
 !/tools/smalltool/NuscenesEnvSnapForReward/

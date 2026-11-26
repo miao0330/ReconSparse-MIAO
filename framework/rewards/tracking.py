@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 import numpy as np
 
@@ -91,11 +92,24 @@ def select_reward_mode_cfg(reward_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
     mode_key = _reward_mode_key(reward_cfg.get("mode", ""))
     mode_cfg = reward_cfg.get(mode_key, None)
     if isinstance(mode_cfg, dict):
-        selected = dict(mode_cfg)
+        common_cfg = reward_cfg.get("common", {})
+        if not isinstance(common_cfg, Mapping):
+            common_cfg = {}
+        selected = _merge_reward_cfg(common_cfg, mode_cfg)
         selected["selected_reward_mode"] = mode_key
         return selected
 
     return reward_cfg
+
+
+def _merge_reward_cfg(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(dict(base))
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_reward_cfg(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 class TrackingRewardComputer:
@@ -139,6 +153,25 @@ class TrackingRewardComputer:
         self._last_craft_global_dev_ratio = None
         self._last_craft_center_dev_ratio = None
         self._last_heading_dev_ratio = None
+
+    def capture_state(self) -> Dict[str, Any]:
+        """Return mutable reward history without copying reward configuration."""
+        return {
+            key: copy.deepcopy(value)
+            for key, value in self.__dict__.items()
+            if key != "reward_cfg"
+        }
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Restore history while preserving this environment's reward profile."""
+        if not isinstance(state, Mapping):
+            raise TypeError("Tracking reward state must be a mapping")
+        expected = {key for key in self.__dict__ if key != "reward_cfg"}
+        missing = sorted(expected.difference(state))
+        if missing:
+            raise ValueError(f"Tracking reward state is missing fields: {missing}")
+        for key in expected:
+            setattr(self, key, copy.deepcopy(state[key]))
 
     #from self.reward_cfg fetch different type of reward cfg
     def _path_cfg(self) -> Dict[str, Any]:

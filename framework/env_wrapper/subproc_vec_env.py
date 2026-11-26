@@ -5,6 +5,7 @@ Canonical implementation migrated from the legacy simulator wrappers.
 
 from __future__ import annotations
 
+import copy
 import multiprocessing as mp
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -214,6 +215,7 @@ class SceneSamplingEnv:
                     info = {}
                 if isinstance(info, dict):
                     info.setdefault("scene", int(self._current_scene))
+                    info.setdefault("scenario_index", int(self._current_scene))
                     try:
                         info.setdefault("now_frame", getattr(self._env.env, "now_frame", None))
                     except Exception:
@@ -235,6 +237,90 @@ class SceneSamplingEnv:
                 attempts += 1
                 continue
         raise RuntimeError(f"SceneSamplingEnv.reset failed after {max_attempts} attempts: {last_err}")
+
+    def reset_to(self, scene_id: int, *, start_frame: int = 0) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """Reset to an explicit episode start without advancing the sampler.
+
+        HUGSIM cannot restore arbitrary closed-loop snapshots, so policy-loop
+        counterfactual branches use this entrypoint and replay the original
+        action prefix from the episode start.
+        """
+        sid = int(scene_id)
+        if sid not in self._scene_ids:
+            raise ValueError(f"scene_id={sid} is not assigned to this environment worker")
+        if self._env_backend == "hugsim_ori" and sid != int(self._current_scene):
+            self.close()
+            self._env = self._create_env_for_scene(sid)
+        obs, info = self._env.reset(
+            scene=sid,
+            start_frame=int(start_frame),
+            step_frames=self._step_frames,
+        )
+        self._current_scene = sid
+        if info is None:
+            info = {}
+        if isinstance(info, dict):
+            info.setdefault("scene", sid)
+            info.setdefault("scenario_index", sid)
+            info.setdefault("start_frame", int(start_frame))
+            try:
+                info.setdefault("now_frame", getattr(self._env.env, "now_frame", None))
+            except Exception:
+                pass
+            if self._env_backend == "hugsim_ori" and self._hugsim_scenarios:
+                scenario = self._hugsim_scenarios[sid % len(self._hugsim_scenarios)]
+                info.setdefault("official_scene_name", str(scenario["official_scene_name"]))
+                info.setdefault("hugsim_scenario_path", str(scenario["scenario_path"]))
+        self._last_obs = obs
+        self._last_info = dict(info) if isinstance(info, dict) else {}
+        return obs, info
+
+    def capture_branch_state(self) -> Dict[str, Any]:
+        capture = getattr(self._env, "capture_branch_state", None)
+        if not callable(capture):
+            raise RuntimeError(
+                f"Environment backend {self._env_backend!r} does not support exact branch snapshots"
+            )
+        if self._last_obs is None:
+            raise RuntimeError("Branch state cannot be captured before environment reset")
+        return {
+            "version": 1,
+            "scene_id": int(self._current_scene),
+            "backend": str(self._env_backend),
+            "backend_state": capture(),
+            "info": copy.deepcopy(self._last_info),
+        }
+
+    def supports_branch_snapshots(self) -> bool:
+        return callable(getattr(self._env, "capture_branch_state", None)) and callable(
+            getattr(self._env, "restore_branch_state", None)
+        )
+
+    def restore_branch_state(self, snapshot: Dict[str, Any]) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        if not isinstance(snapshot, dict) or int(snapshot.get("version", -1)) != 1:
+            raise ValueError("Unsupported SceneSamplingEnv branch snapshot")
+        if str(snapshot.get("backend", "")) != str(self._env_backend):
+            raise ValueError(
+                "Branch snapshot backend mismatch: "
+                f"snapshot={snapshot.get('backend', None)!r} env={self._env_backend!r}"
+            )
+        scene_id = int(snapshot["scene_id"])
+        if scene_id not in self._scene_ids:
+            raise ValueError(f"scene_id={scene_id} is not assigned to this environment worker")
+        if self._env_backend == "hugsim_ori" and scene_id != int(self._current_scene):
+            self.close()
+            self._env = self._create_env_for_scene(scene_id)
+        restore = getattr(self._env, "restore_branch_state", None)
+        if not callable(restore):
+            raise RuntimeError(
+                f"Environment backend {self._env_backend!r} does not support exact branch restore"
+            )
+        restored_obs, restored_info = restore(dict(snapshot["backend_state"]))
+        self._current_scene = int(scene_id)
+        self._last_obs = copy.deepcopy(restored_obs)
+        saved_info = snapshot.get("info", restored_info)
+        self._last_info = copy.deepcopy(saved_info)
+        return copy.deepcopy(self._last_obs), copy.deepcopy(self._last_info)
 
     def step(self, action: Any):
         obs, reward, terminated, truncated, info = self._env.step(action)

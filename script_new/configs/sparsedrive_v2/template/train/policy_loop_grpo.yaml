@@ -1,0 +1,17 @@
+train:
+  policy_loop_grpo:
+    enable: true
+    coef: 0.1
+    num_candidates: 4
+    branch_horizon_steps: 16
+    branch_parallelism: 4
+    branch_bootstrap: auto
+    keyframe_times_s: [4.0, 8.0]
+    rl_step_s: 0.5
+    intervention_steps: 2
+    severe_offroad_lateral_m: 3.5
+    continuation_mode: argmax
+    deterministic_seed: true
+    norm_eps: 1.0e-6
+    train_metric_heads_only: true
+    metric_heads_prefix: _trajectory_head.decoder.layers.1.metric_heads

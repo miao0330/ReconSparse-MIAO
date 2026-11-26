@@ -36,14 +36,56 @@ def prepend_env_path(env: Dict[str, str], key: str, values: List[str]) -> None:
         env[key] = os.pathsep.join(parts)
 
 
-def candidate_cuda_roots() -> List[str]:
+def _path_has_cuda_runtime_header(path: str) -> bool:
+    return os.path.isfile(os.path.join(str(path), "cuda_runtime.h"))
+
+
+def cuda_home_has_usable_toolkit(cuda_home: str) -> bool:
+    root = str(cuda_home or "").strip()
+    if not root:
+        return False
+    if os.path.isfile(os.path.join(root, "bin", "nvcc")):
+        return True
+    if _path_has_cuda_runtime_header(os.path.join(root, "include")):
+        return True
+    target_include = os.path.join(root, "targets", "x86_64-linux", "include")
+    return _path_has_cuda_runtime_header(target_include)
+
+
+def resolve_cuda_home(*, env: Optional[Dict[str, str]] = None) -> str:
+    """Pick a CUDA toolkit root that actually exists on this machine."""
+    source = env if env is not None else os.environ
+    explicit = str(source.get("CUDA_HOME", "") or source.get("CUDA_PATH", "")).strip()
+    if explicit and cuda_home_has_usable_toolkit(explicit):
+        return explicit
+
+    py_prefix = str(sys.prefix or "").strip()
+    if py_prefix and cuda_home_has_usable_toolkit(py_prefix):
+        return py_prefix
+
+    for candidate in (
+        "/usr/local/cuda",
+        "/usr/local/cuda-12.1",
+        "/usr/local/cuda-12",
+        "/usr/local/cuda-11.8",
+    ):
+        if cuda_home_has_usable_toolkit(candidate):
+            return candidate
+
+    return explicit or py_prefix
+
+
+def candidate_cuda_roots(*, env: Optional[Dict[str, str]] = None) -> List[str]:
     roots: List[str] = []
+    source = env if env is not None else os.environ
     for item in [
-        os.environ.get("CUDA_HOME", ""),
-        os.environ.get("CUDA_PATH", ""),
+        resolve_cuda_home(env=source),
+        str(source.get("CUDA_PATH", "")).strip(),
         sys.prefix,
         sys.exec_prefix,
         "/usr/local/cuda",
+        "/usr/local/cuda-12.1",
+        "/usr/local/cuda-12",
     ]:
         text = str(item).strip()
         if text and text not in roots:
@@ -51,10 +93,10 @@ def candidate_cuda_roots() -> List[str]:
     return roots
 
 
-def candidate_cuda_include_dirs() -> List[str]:
+def candidate_cuda_include_dirs(*, env: Optional[Dict[str, str]] = None) -> List[str]:
     includes: List[str] = []
     py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    for root in candidate_cuda_roots():
+    for root in candidate_cuda_roots(env=env):
         for path in [
             os.path.join(root, "include"),
             os.path.join(root, "targets", "x86_64-linux", "include"),
@@ -66,10 +108,10 @@ def candidate_cuda_include_dirs() -> List[str]:
     return includes
 
 
-def candidate_cuda_library_dirs() -> List[str]:
+def candidate_cuda_library_dirs(*, env: Optional[Dict[str, str]] = None) -> List[str]:
     libs: List[str] = []
     py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    for root in candidate_cuda_roots():
+    for root in candidate_cuda_roots(env=env):
         for path in [
             os.path.join(root, "lib64"),
             os.path.join(root, "targets", "x86_64-linux", "lib"),
@@ -103,19 +145,13 @@ def build_launch_env(*, agent_type: Optional[str] = None) -> Dict[str, str]:
 
     prepend_env_path(env, "PYTHONPATH", pythonpath_entries)
 
-    cuda_home = env.get("CUDA_HOME", "").strip()
-    if not cuda_home:
-        for root in candidate_cuda_roots():
-            include_dir = os.path.join(root, "include")
-            target_include_dir = os.path.join(root, "targets", "x86_64-linux", "include")
-            if os.path.exists(os.path.join(include_dir, "cuda_runtime.h")) or os.path.exists(os.path.join(target_include_dir, "cuda_runtime.h")):
-                cuda_home = root
-                break
+    cuda_home = resolve_cuda_home(env=env)
     if cuda_home:
         env["CUDA_HOME"] = str(cuda_home)
+        prepend_env_path(env, "PATH", [os.path.join(cuda_home, "bin")])
 
-    include_dirs = candidate_cuda_include_dirs()
-    library_dirs = candidate_cuda_library_dirs()
+    include_dirs = candidate_cuda_include_dirs(env=env)
+    library_dirs = candidate_cuda_library_dirs(env=env)
     prepend_env_path(env, "CPATH", include_dirs)
     prepend_env_path(env, "CPLUS_INCLUDE_PATH", include_dirs)
     prepend_env_path(env, "LIBRARY_PATH", library_dirs)
@@ -128,5 +164,7 @@ __all__ = [
     "candidate_cuda_include_dirs",
     "candidate_cuda_library_dirs",
     "candidate_cuda_roots",
+    "cuda_home_has_usable_toolkit",
     "prepend_env_path",
+    "resolve_cuda_home",
 ]

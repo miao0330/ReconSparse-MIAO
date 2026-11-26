@@ -1,0 +1,29 @@
+train:
+  actor_learner:
+    mode: async
+    timestamp_buffer_dir: false
+    learner_gpu_id: 0
+    learner_gpu_ids: [0]
+    actor_gpu_pool: [1, 2, 3, 4, 5, 6, 7]
+    actors_per_gpu: 1
+    auto_max_inflight_per_actor: false
+    max_inflight_per_actor: 64
+    pause_actor_on_learner_gpu: true
+    scene_shard_by_actor: true
+    scene_shard_strategy: round_robin
+    actor_horizon: 32
+    num_envs_per_actor: 1
+    vec_env_mode: serial
+    max_shard_version_lag: 2
+    variable_shard_on_done: true
+    samples_per_update: 786
+    shards_per_update: 48
+    poll_interval_s: 0.1
+    shard_collect_timeout_s: 1800
+    actor_shard_stall_timeout_s: 3600
+    allow_partial_updates_after_timeout: true
+    restart_failed_actors: false
+    max_actor_restarts: 0
+    max_updates: 32
+  ddp:
+    grad_accum_steps: 1

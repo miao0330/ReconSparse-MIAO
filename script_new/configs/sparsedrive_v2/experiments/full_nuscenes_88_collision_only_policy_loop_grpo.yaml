@@ -1,0 +1,252 @@
+# Generated at: 2026-07-21T15:28:46+00:00
+# Reward: collision-only dense penalty; all progress/tracking/comfort/safety weights are zero.
+extends:
+- ../template/base.yaml
+- ../template/env/base.yaml
+- ../template/env/rewards/step_path.yaml
+- ../template/train/actor_learner.yaml
+- ../template/train/reinforcepp.yaml
+- ../template/train/policy_loop_grpo.yaml
+- ../template/agent/sparsedrive_v2.yaml
+env:
+  use_all_scenes: false
+  scene_sampling: random
+  max_steps: 36
+  start_frame:
+    mode: zero
+    allow_short_tail: false
+    min: 0
+  hugsim:
+    scenes:
+    - scene-0013-easy-00.yaml
+    - scene-0013-extreme-00.yaml
+    - scene-0013-hard-00.yaml
+    - scene-0013-medium-00.yaml
+    - scene-0038-easy-00.yaml
+    - scene-0038-extreme-00.yaml
+    - scene-0038-hard-00.yaml
+    - scene-0038-medium-00.yaml
+    - scene-0038-medium-01.yaml
+    - scene-0041-easy-00.yaml
+    - scene-0041-extreme-00.yaml
+    - scene-0041-hard-00.yaml
+    - scene-0041-medium-00.yaml
+    - scene-0041-medium-01.yaml
+    - scene-0051-easy-00.yaml
+    - scene-0051-extreme-00.yaml
+    - scene-0051-hard-00.yaml
+    - scene-0051-medium-00.yaml
+    - scene-0051-medium-01.yaml
+    - scene-0062-easy-00.yaml
+    - scene-0062-extreme-00.yaml
+    - scene-0062-hard-00.yaml
+    - scene-0062-medium-00.yaml
+    - scene-0062-medium-01.yaml
+    - scene-0064-easy-00.yaml
+    - scene-0064-extreme-00.yaml
+    - scene-0064-hard-00.yaml
+    - scene-0064-medium-00.yaml
+    - scene-0064-medium-01.yaml
+    - scene-0071-easy-00.yaml
+    - scene-0071-extreme-00.yaml
+    - scene-0071-hard-00.yaml
+    - scene-0071-medium-00.yaml
+    - scene-0071-medium-01.yaml
+    - scene-0138-easy-00.yaml
+    - scene-0138-extreme-00.yaml
+    - scene-0138-hard-00.yaml
+    - scene-0138-medium-00.yaml
+    - scene-0138-medium-01.yaml
+    - scene-0166-easy-00.yaml
+    - scene-0166-extreme-00.yaml
+    - scene-0166-hard-00.yaml
+    - scene-0166-medium-00.yaml
+    - scene-0166-medium-01.yaml
+    - scene-0167-easy-00.yaml
+    - scene-0167-extreme-00.yaml
+    - scene-0167-hard-00.yaml
+    - scene-0167-medium-00.yaml
+    - scene-0167-medium-01.yaml
+    - scene-0254-easy-00.yaml
+    - scene-0254-extreme-00.yaml
+    - scene-0254-hard-00.yaml
+    - scene-0254-medium-00.yaml
+    - scene-0254-medium-01.yaml
+    - scene-0383-easy-00.yaml
+    - scene-0383-extreme-00.yaml
+    - scene-0383-hard-00.yaml
+    - scene-0383-medium-00.yaml
+    - scene-0383-medium-01.yaml
+    - scene-0411-easy-00.yaml
+    - scene-0411-extreme-00.yaml
+    - scene-0411-hard-00.yaml
+    - scene-0411-medium-00.yaml
+    - scene-0411-medium-01.yaml
+    - scene-0418-easy-00.yaml
+    - scene-0418-extreme-00.yaml
+    - scene-0418-hard-00.yaml
+    - scene-0418-medium-00.yaml
+    - scene-0418-medium-01.yaml
+    - scene-0528-easy-00.yaml
+    - scene-0528-extreme-00.yaml
+    - scene-0528-hard-00.yaml
+    - scene-0528-medium-00.yaml
+    - scene-0528-medium-01.yaml
+    - scene-0661-easy-00.yaml
+    - scene-0661-extreme-00.yaml
+    - scene-0661-hard-00.yaml
+    - scene-0661-medium-00.yaml
+    - scene-0661-medium-01.yaml
+    - scene-0920-easy-00.yaml
+    - scene-0920-extreme-00.yaml
+    - scene-0920-hard-00.yaml
+    - scene-0920-medium-00.yaml
+    - scene-0930-easy-00.yaml
+    - scene-0930-extreme-00.yaml
+    - scene-0930-hard-00.yaml
+    - scene-0930-medium-00.yaml
+    - scene-0930-medium-01.yaml
+    output_root: /htfs/filesystem_nas/ht_logs/lixm/reconsparse/exp/full_nuscenes_88_collision_only/hugsim/policy_loop_grpo
+  reward:
+    step_path:
+      CRAFT:
+        enable: false
+      path:
+        interp_ds_m: 0.25
+        w_progress: 0.0
+        progress_forward_cap_m: 2.0
+        progress_backward_cap_m: 0.5
+        w_lateral: 0.0
+        lateral_free_m: 0.3
+        lateral_huber_delta_m: 0.5
+        w_yaw: 0.0
+        yaw_free_deg: 5.0
+        yaw_huber_delta_deg: 10.0
+        severe_gate_scale: 0.0
+      comfort:
+        w_longitudinal_jerk: 0.0
+        w_yaw_jerk: 0.0
+        longitudinal_jerk_free: 1.5
+        longitudinal_jerk_delta: 2.0
+        yaw_jerk_free: 0.2
+        yaw_jerk_delta: 0.3
+        jerk_clip: 50.0
+      collision:
+        mode: dense_penalty
+        w_static: 500.0
+        w_dynamic: 500.0
+        gate_scale: 0.0
+      safety:
+        enable: false
+        lookahead_m: 15.0
+        corridor_half_width_m: 2.5
+        safe_gap_m: 8.0
+        safe_ttc_s: 3.0
+        w_clearance: 0.0
+        w_ttc: 0.0
+        progress_gate_strength: 0.0
+        min_progress_gate: 1.0
+train:
+  wandb:
+    enabled: false
+    group: FullNuScenes88_CollisionOnly_policy_loop_GRPO
+  actor_learner:
+    buffer_dir: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/outputs/full_nuscenes_88_collision_only/train/policy_loop_grpo/actor_learner
+    timestamp_buffer_dir: false
+    learner_gpu_id: 0
+    learner_gpu_ids:
+    - 0
+    actor_gpu_pool:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    actors_per_gpu: 1
+    auto_max_inflight_per_actor: false
+    max_inflight_per_actor: 64
+    actor_horizon: 32
+    num_envs_per_actor: 1
+    vec_env_mode: serial
+    samples_per_update: 786
+    shards_per_update: 48
+    shard_collect_timeout_s: 1800
+    actor_shard_stall_timeout_s: 3600
+    allow_partial_updates_after_timeout: true
+    restart_failed_actors: false
+    max_actor_restarts: 0
+    max_updates: 32
+  policy_loop_grpo:
+    enable: true
+    coef: 0.1
+    num_candidates: 4
+    branch_horizon_steps: 16
+    branch_parallelism: 4
+    branch_bootstrap: auto
+    keyframe_times_s:
+    - 4.0
+    - 8.0
+    rl_step_s: 0.5
+    intervention_steps: 2
+    severe_offroad_lateral_m: 3.5
+    continuation_mode: argmax
+    deterministic_seed: true
+    norm_eps: 1.0e-06
+    train_metric_heads_only: true
+    metric_heads_prefix: _trajectory_head.decoder.layers.1.metric_heads
+    reward:
+      mode: step_path
+      common:
+        dt: 0.5
+        ea:
+          enable: false
+          weight: 0.0
+        terminal:
+          enable: true
+          penalty: 0.0
+          success_bonus: 0.0
+          apply_on_failure: true
+          apply_on_timeout: false
+          apply_on_env_done: false
+      step_path:
+        CRAFT:
+          enable: false
+        path:
+          interp_ds_m: 0.25
+          w_progress: 0.0
+          progress_forward_cap_m: 2.0
+          progress_backward_cap_m: 0.5
+          w_lateral: 0.0
+          lateral_free_m: 0.3
+          lateral_huber_delta_m: 0.5
+          w_yaw: 0.0
+          yaw_free_deg: 5.0
+          yaw_huber_delta_deg: 10.0
+          severe_gate_scale: 0.0
+        comfort:
+          w_longitudinal_jerk: 0.0
+          w_yaw_jerk: 0.0
+          longitudinal_jerk_free: 1.5
+          longitudinal_jerk_delta: 2.0
+          yaw_jerk_free: 0.2
+          yaw_jerk_delta: 0.3
+          jerk_clip: 50.0
+        collision:
+          mode: dense_penalty
+          w_static: 500.0
+          w_dynamic: 500.0
+          gate_scale: 0.0
+        safety:
+          enable: false
+          lookahead_m: 15.0
+          corridor_half_width_m: 2.5
+          safe_gap_m: 8.0
+          safe_ttc_s: 3.0
+          w_clearance: 0.0
+          w_ttc: 0.0
+          progress_gate_strength: 0.0
+          min_progress_gate: 1.0
+agent:
+  ckpt: /htfs/filesystem_pfs/waytous/lixm/ReconSparse/egoADs/SparseDriveV2/ckpt/sparsedrive_navsimv2.ckpt

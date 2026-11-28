@@ -105,7 +105,8 @@ def _command4(hugsim_info: dict[str, Any]) -> np.ndarray:
 
 
 def _ego_status(hugsim_info: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    steer = float(hugsim_info.get("ego_steer", 0.0))
+    # Native simulator steering is right-positive; model FLU yaw is left-positive.
+    steer = -float(hugsim_info.get("ego_steer", 0.0))
     speed = float(hugsim_info.get("ego_velo", 0.0))
     acc = float(hugsim_info.get("accelerate", 0.0))
     wheelbase = float(hugsim_info.get("wheelbase", 0.0))
@@ -248,7 +249,7 @@ def build_hugsim_training_obs(
     hugsim_info: dict[str, Any],
     mapping: HUGSIMFrameMapping,
     hugsim_step_idx: int,
-    camera_geometry: str = "rendered",
+    camera_geometry: str = "ground",
 ) -> dict[str, Any]:
     """Build the training observation used by HUGSIM-first rollouts.
 
@@ -272,7 +273,7 @@ def build_hugsim_training_obs(
         image = np.asarray(rgb[hugsim_cam], dtype=np.uint8)
         out[obs_key] = image
         params = cam_params.get(hugsim_cam, {})
-        if geometry == "rendered":
+        if geometry in {"rendered", "ground"}:
             pose = np.asarray(ground_poses.get(hugsim_cam), dtype=np.float32)
             if pose.shape != (4, 4) or not np.isfinite(pose).all():
                 raise ValueError(
@@ -282,7 +283,12 @@ def build_hugsim_training_obs(
             intrinsic = params.get("intrinsic")
             if intrinsic is None or image.shape[:2] != (intrinsic["H"], intrinsic["W"]):
                 raise ValueError(f"HUGSIM RGB size or intrinsics are invalid for {hugsim_cam}")
-            cam2ego[cam_idx] = np.asarray(hugsim_info.get("ground_to_model_flu", np.eye(4))) @ pose
+            model_transform = (
+                np.asarray(hugsim_info.get("ground_to_model_flu", np.eye(4)))
+                if geometry == "rendered"
+                else np.eye(4, dtype=np.float32)
+            )
+            cam2ego[cam_idx] = model_transform @ pose
         elif geometry in {"navsim_lidar", "legacy_hf"} and "l2c" in params:
             hugsim_lidar_to_camera = np.asarray(params["l2c"], dtype=np.float32)
             navsim_lidar_to_camera = hugsim_lidar_to_camera @ np.linalg.inv(HUGSIM_LIDAR_TO_NAVSIM_LIDAR)
@@ -308,9 +314,14 @@ def build_hugsim_training_obs(
             cam_hw[cam_idx] = np.asarray([float(image.shape[0]), float(image.shape[1])], dtype=np.float32)
 
     command, velocity, acceleration = _ego_status(hugsim_info)
-    if geometry == "rendered" and "model_ego_velocity" in hugsim_info:
-        velocity = np.asarray(hugsim_info["model_ego_velocity"], dtype=np.float32)
-        acceleration = np.asarray(hugsim_info["model_ego_acceleration"], dtype=np.float32)
+    if geometry == "rendered":
+        if "model_ego_velocity" in hugsim_info:
+            velocity = np.asarray(hugsim_info["model_ego_velocity"], dtype=np.float32)
+            acceleration = np.asarray(hugsim_info["model_ego_acceleration"], dtype=np.float32)
+        elif "wheelbase" in hugsim_info and "ego_velo" in hugsim_info:
+            velocity, acceleration = _hugsim_geometry().vehicle_reference_dynamics(
+                hugsim_info, hugsim_info.get("ground_to_model_flu", np.eye(4)),
+            )
     ego_status = np.concatenate([command, velocity, acceleration], axis=0).astype(np.float32)
     out["driving_command"] = command
     out["ego_velocity"] = velocity
@@ -351,12 +362,14 @@ def build_recondreamer_obs_from_hugsim(
 def _infer_hugsim_fifo_plan_lateral_convention(hugsim_repo: str | Path) -> str:
     """Return the FIFO plan lateral convention expected by the HUGSIM repo.
 
-    Current HUGSIM converts FIFO plans from SparseDrive lidar coordinates
-    (right, forward) into controller coordinates (forward, left). Older
-    HUGSIM-ORI variants only swap axes, so their FIFO input must already carry
-    left-positive lateral values to reach the same controller frame.
+    Official HUGSIM (62c690d) and current HUGSIM-ORI expect FIFO plans in HUGSIM
+    LiDAR coordinates (x=right, y=forward) and pass the shared controller's
+    native steering rate directly to HUGSimEnv.  Only legacy forks that kept
+    ``plan_traj[:, [1, 0]]`` while negating ``steer_rate`` in
+    ``control_conventions.py`` expected left-positive FIFO plans.
     """
     sim_utils_path = Path(hugsim_repo) / "sim" / "utils" / "sim_utils.py"
+    conventions_path = Path(hugsim_repo) / "sim" / "utils" / "control_conventions.py"
     try:
         text = sim_utils_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -364,7 +377,13 @@ def _infer_hugsim_fifo_plan_lateral_convention(hugsim_repo: str | Path) -> str:
     if "ego_plan_traj[:, 1] *= -1" in text or "plan_traj_stats[1:, :2] = ego_plan_traj" in text:
         return "right_forward"
     if "plan_traj_stats[1:, :2] = plan_traj[:, [1,0]]" in text or "plan_traj_stats[1:, :2] = plan_traj[:, [1, 0]]" in text:
-        return "left_forward"
+        try:
+            conv_text = conventions_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            conv_text = ""
+        if "return -float(" in conv_text:
+            return "left_forward"
+        return "right_forward"
     return "right_forward"
 
 
@@ -859,6 +878,7 @@ class HUGSIMReconEnv:
         substeps_per_rl_step: int = 2,
         cuda: int | None = None,
         min_gt_route_points: int = 2,
+        camera_geometry: str | None = None,
     ) -> None:
         self.official_scene_name = str(scenario_name)
         self.scenario_path = str(scenario_path)
@@ -866,6 +886,26 @@ class HUGSIMReconEnv:
         self.raw_reward_cfg = reward_cfg or {}
         self.reward_cfg = select_reward_mode_cfg(self.raw_reward_cfg)
         self.hugsim_repo = str(hugsim_repo)
+        resolved_base_path = (
+            resolve_hugsim_path(str(base_path))
+            if base_path is not None
+            else Path(self.hugsim_repo) / "configs" / "sim" / "nuscenes_eval_sparsedrive_v2_ppo_grpo_ver14.yaml"
+        )
+        yaml_geometry: str | None = None
+        try:
+            import yaml
+
+            base_payload = yaml.safe_load(Path(resolved_base_path).read_text(encoding="utf-8"))
+            if isinstance(base_payload, dict) and base_payload.get("sparsedrive_v2_camera_geometry"):
+                yaml_geometry = str(base_payload["sparsedrive_v2_camera_geometry"]).strip().lower()
+        except Exception:
+            yaml_geometry = None
+        self.camera_geometry = str(
+            camera_geometry
+            or os.environ.get("SPARSEDRIVE_CAMERA_GEOMETRY", "").strip()
+            or yaml_geometry
+            or "ground"
+        ).strip().lower()
         self._fifo_plan_lateral_convention = _infer_hugsim_fifo_plan_lateral_convention(self.hugsim_repo)
         self.substeps_per_rl_step = max(1, int(substeps_per_rl_step))
         self.launch_mode = str(launch_mode).strip().lower()
@@ -1178,6 +1218,7 @@ class HUGSIMReconEnv:
             hugsim_info=hugsim_info,
             mapping=mapping,
             hugsim_step_idx=self._hugsim_step_idx,
+            camera_geometry=getattr(self, "camera_geometry", "ground"),
         )
         alignment = self._get_alignment(mapping)
         alignment = self._alignment_for_step(alignment=alignment, mapping=mapping, hugsim_info=dict(hugsim_info))
@@ -1239,6 +1280,7 @@ class HUGSIMReconEnv:
             hugsim_info=dict(hugsim_info),
             mapping=mapping,
             hugsim_step_idx=self._hugsim_step_idx,
+            camera_geometry=getattr(self, "camera_geometry", "ground"),
         )
         info: dict[str, Any] = {
             "scene": int(mapping.recon_scene_id),
@@ -1264,9 +1306,14 @@ class HUGSIMReconEnv:
         return obs, info
 
     def _plan_from_action(self, action: Any) -> np.ndarray:
+        geometry = str(getattr(self, "camera_geometry", "ground")).strip().lower()
+        transform = (
+            (self._last_hugsim_info or {}).get("ground_to_model_flu")
+            if geometry == "rendered"
+            else None
+        )
         if isinstance(self._external_plan_local_xyyaw, np.ndarray) and self._external_plan_local_xyyaw.ndim == 2:
             plan = np.asarray(self._external_plan_local_xyyaw, dtype=np.float32)
-            transform = (self._last_hugsim_info or {}).get("ground_to_model_flu")
             if transform is not None:
                 plan = _hugsim_geometry().vehicle_trajectory_to_ground(plan, transform)
             hugsim_plan = _canonical_local_xy_to_hugsim_fifo_plan(
@@ -1277,7 +1324,6 @@ class HUGSIMReconEnv:
             return hugsim_plan
         if isinstance(action, (tuple, list)) and len(action) >= 3:
             first = np.asarray([[float(action[0]), float(action[1]), float(action[2])]], dtype=np.float32)
-            transform = (self._last_hugsim_info or {}).get("ground_to_model_flu")
             if transform is not None:
                 first = _hugsim_geometry().vehicle_trajectory_to_ground(first, transform)
             return _canonical_local_xy_to_hugsim_fifo_plan(
@@ -1304,6 +1350,7 @@ class HUGSIMReconEnv:
             hugsim_info=hugsim_info,
             mapping=mapping,
             hugsim_step_idx=self._hugsim_step_idx,
+            camera_geometry=getattr(self, "camera_geometry", "ground"),
         )
         info = {
             "scene": int(mapping.recon_scene_id),

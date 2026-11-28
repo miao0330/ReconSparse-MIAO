@@ -344,7 +344,7 @@ def build_eval_existing_ckpt_command(
     agent_type: str = "sparsedrive_v2",
     sparsedrive_bridge_variant: str = "recon_policy",
     sparsedrive_image_preprocess: str = "legacy_hf",
-    sparsedrive_camera_geometry: str = "rendered",
+    sparsedrive_camera_geometry: str = "ground",
 ) -> list[str]:
     if (
         str(agent_type).strip().lower().replace("-", "_") == "diffusiondrive_v2"
@@ -532,8 +532,8 @@ def parse_train_eval_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--sparsedrive-camera-geometry",
-        choices=("rendered", "navsim_lidar", "vehicle"),
-        default="rendered",
+        choices=("rendered", "ground", "navsim_lidar", "vehicle"),
+        default="ground",
     )
     parser.add_argument("--ppo", action="store_true", help="Run PPO in addition to the default ReinforcePP run")
     parser.add_argument("--skip-reinforcepp", action="store_true", help="Skip the default ReinforcePP run")

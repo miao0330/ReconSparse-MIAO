@@ -231,7 +231,10 @@ class SparseDriveV2RLAdapterMixin:
             feature_dim = int(self.value_feature_dim or 0)
             return torch.empty((0, feature_dim), device=self.device, dtype=torch.float32)
 
-        features_list = [self._build_features(obs) for obs in observations]
+        features_list = [
+            self._build_features(obs, image_preprocess=self._image_preprocess)
+            for obs in observations
+        ]
         camera_keys = list(features_list[0]["camera_feature"].keys())
         batched_camera = {
             key: torch.cat([feat["camera_feature"][key] for feat in features_list], dim=0)

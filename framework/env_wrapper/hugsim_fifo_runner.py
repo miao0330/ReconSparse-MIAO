@@ -228,6 +228,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def reset_hugsim_for_official_episode_start(env: Any) -> tuple[Any, dict[str, Any]]:
+    """Match official HUGSIM closed_loop.py double-reset initialization."""
+    env.reset()
+    obs, info = env.reset()
+    return obs, dict(info)
+
+
 def execute_control_substeps(
     *,
     env: Any,
@@ -244,9 +251,8 @@ def execute_control_substeps(
     if step_dt is not None:
         controller_info["dt"] = float(step_dt)
     acc, steer_rate = traj2control(np.asarray(plan, dtype=np.float32), controller_info)
-    # The controller uses left-positive steering; HUGSIM's internal bicycle
-    # state uses right-positive steering.
-    action = {"acc": float(acc), "steer_rate": -float(steer_rate)}
+    # Match official HUGSIM: pass the shared controller's native action through.
+    action = {"acc": float(acc), "steer_rate": float(steer_rate)}
 
     obs = None
     info: dict[str, Any] = dict(initial_info)
@@ -296,8 +302,10 @@ def run_fifo_env(args: argparse.Namespace) -> None:
 
     import gymnasium  # type: ignore
     import hugsim_env  # noqa: F401
+    from sim.utils.ad_config import normalize_ad_name  # type: ignore
     from sim.utils.config_loader import load_closed_loop_cfg  # type: ignore
     from sim.utils.sim_utils import traj2control  # type: ignore
+    from sim.utils.sparsedrive_vehicle import load_sparsedrive_wheelbase  # type: ignore
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -318,10 +326,19 @@ def run_fifo_env(args: argparse.Namespace) -> None:
             kinematic_path=str(args.kinematic_path),
             ad=str(args.ad),
         )
+        if normalize_ad_name(str(args.ad)) == "sparsedrive_v2" and os.environ.get("HUGSIM_USE_AGENT_WHEELBASE", "").strip() == "1":
+            wheelbase = load_sparsedrive_wheelbase(
+                getattr(cfg.base, "sparsedrive_v2_repo", ""),
+                getattr(cfg.base, "sparsedrive_v2_nuplan_repo", None),
+            )
+            if wheelbase is not None:
+                cfg.kinematic.Lf = float(wheelbase) / 2.0
+                cfg.kinematic.Lr = float(wheelbase) / 2.0
+                print(f"[hugsim_fifo_runner] Using SparseDriveV2 wheelbase override: {wheelbase}", flush=True)
         _write_status(output_dir, state="making_env", pid=os.getpid(), started_at=time.time())
         env = gymnasium.make("hugsim_env/HUGSim-v0", cfg=cfg, output=str(output_dir))
         _write_status(output_dir, state="resetting", pid=os.getpid(), started_at=time.time())
-        obs, info = env.reset()
+        obs, info = reset_hugsim_for_official_episode_start(env)
         substeps = max(1, int(args.substeps_per_rl_step))
         print(f"[hugsim_fifo_runner] substeps_per_rl_step={substeps}", flush=True)
         _write_status(

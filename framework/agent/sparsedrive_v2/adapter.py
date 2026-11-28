@@ -320,7 +320,10 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         state_dict: Dict[str, torch.Tensor] = {}
         for key, value in sd_raw.items():
             if torch.is_tensor(value):
-                state_dict[_strip_state_dict_prefix(str(key))] = value
+                normalized_key = _strip_state_dict_prefix(str(key))
+                if normalized_key.startswith("img_backbone"):
+                    normalized_key = "_backbone." + normalized_key
+                state_dict[normalized_key] = value
         model = self._model.module if isinstance(self._model, DDP) else self._model
         model.load_state_dict(state_dict, strict=bool(strict))
 
@@ -523,10 +526,11 @@ class SparseDriveV2Policy(SparseDriveV2RLAdapterMixin, SparseDriveV2CandidateAda
         self,
         observation: Dict[str, Any],
         *,
-        image_preprocess: str = "native",
+        image_preprocess: str | None = None,
     ) -> Dict[str, Any]:
         missing_fields: List[str] = []
-        image_preprocess = str(image_preprocess).strip().lower()
+        resolved_preprocess = self._image_preprocess if image_preprocess is None else image_preprocess
+        image_preprocess = str(resolved_preprocess).strip().lower()
         if image_preprocess not in {"native", "legacy_hf"}:
             raise ValueError(f"Unsupported SparseDriveV2 image preprocessing: {image_preprocess!r}")
 

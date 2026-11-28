@@ -53,8 +53,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--camera-geometry",
-        default=os.environ.get("SPARSEDRIVE_CAMERA_GEOMETRY", "rendered"),
-        choices=("rendered", "navsim_lidar", "vehicle"),
+        default=os.environ.get("SPARSEDRIVE_CAMERA_GEOMETRY", "ground"),
+        choices=("rendered", "ground", "navsim_lidar", "vehicle"),
     )
     return parser.parse_args()
 
@@ -99,7 +99,7 @@ def raw_hugsim_to_policy_observation(
     *,
     scene_name: str,
     frame_idx: int,
-    camera_geometry: str = "rendered",
+    camera_geometry: str = "ground",
 ) -> dict[str, Any]:
     """Reuse the canonical HUGSIM -> SparseDrive observation conversion."""
     if not isinstance(raw_data, tuple) or len(raw_data) != 2:
@@ -181,7 +181,7 @@ def run_fifo(
     mode_idx: int = -1,
     mode_select: str = "greedy",
     image_preprocess: str = "legacy_hf",
-    camera_geometry: str = "rendered",
+    camera_geometry: str = "ground",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     obs_pipe = output_dir / "obs_pipe"
